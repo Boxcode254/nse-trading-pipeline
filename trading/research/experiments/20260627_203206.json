@@ -1,0 +1,26 @@
+{
+  "id": "20260627_203206",
+  "timestamp": "2026-06-27T20:32:06.481394+00:00",
+  "title": "SMA(200) Trend Filter Performance",
+  "hypothesis": "Adding a SMA(200) trend filter (only take long signals when price > SMA(200)) will improve risk-adjusted returns by keeping the strategy out of bear markets.",
+  "strategy_name": "SMA(20/50) + SMA(200) filter (Strategy C)",
+  "pairs_tested": [
+    "EUR/USD",
+    "USD/KES",
+    "SCOM",
+    "KCB",
+    "EQTY",
+    "EABL",
+    "ABSA",
+    "SCBK"
+  ],
+  "results_summary": "Strategy C underperforms baseline across all 8 pairs. Average return dropped from +7.8% to +1.3% (-83%). Sharpe fell from 0.20 to 0.10. Drawdown improved only marginally (14.7% \u2192 8.8%). The filter was too restrictive in a bull market.",
+  "conclusion": "The SMA(200) trend filter is harmful in the current bull-market regime. Returns reduced far more than risk.",
+  "next_step": "Test volatility-based filter (ATR or Bollinger Bands) or MACD confirmation.",
+  "metrics": {
+    "strategy_a_avg_return": 7.8,
+    "strategy_c_avg_return": 1.3,
+    "strategy_a_avg_sharpe": 0.2,
+    "strategy_c_avg_sharpe": 0.1
+  }
+}

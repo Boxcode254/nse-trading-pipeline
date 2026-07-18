@@ -1,0 +1,63 @@
+"""Paper Portfolio Manager package.
+
+Owns the state, transaction log, snapshot series, and benchmark
+definition for a single paper-trading portfolio. See ``engine`` for
+the data layer and ``trading.cli.commands.portfolio`` for the CLI.
+"""
+from .engine import (
+    DEFAULT_CAPITAL,
+    DEFAULT_PORTFOLIO_DIR,
+    InsufficientCashError,
+    InsufficientSharesError,
+    PortfolioError,
+    PortfolioExistsError,
+    PortfolioState,
+    Position,
+    Snapshot,
+    Transaction,
+    TRANSACTION_FEE_PCT,
+    UnknownPositionError,
+    buy,
+    compute_drawdown,
+    compute_holdings_value,
+    compute_unrealised_pnl,
+    fetch_latest_prices,
+    init_portfolio,
+    load_benchmark,
+    load_snapshots,
+    load_state,
+    load_transactions,
+    portfolio_exists,
+    sell,
+    snapshots_to_csv,
+    take_snapshot,
+)
+
+__all__ = [
+    "DEFAULT_CAPITAL",
+    "DEFAULT_PORTFOLIO_DIR",
+    "InsufficientCashError",
+    "InsufficientSharesError",
+    "PortfolioError",
+    "PortfolioExistsError",
+    "PortfolioState",
+    "Position",
+    "Snapshot",
+    "Transaction",
+    "TRANSACTION_FEE_PCT",
+    "UnknownPositionError",
+    "buy",
+    "compute_drawdown",
+    "compute_holdings_value",
+    "compute_unrealised_pnl",
+    "fetch_latest_prices",
+    "init_portfolio",
+    "load_benchmark",
+    "load_snapshots",
+    "load_state",
+    "load_transactions",
+    "portfolio_exists",
+    "sell",
+    "snapshots_to_csv",
+    "take_snapshot",
+]

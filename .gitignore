@@ -1,0 +1,78 @@
+# ── Secrets & env ──────────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*credentials*
+*secrets*
+
+# ── Runtime portfolio state (NEVER commit) ─────────────────────────────────
+.trading/
+portfolio/state.json
+portfolio/snapshots.json
+portfolio/transactions.json
+portfolio/benchmark.json
+portfolio/mtm_state.json
+portfolio/*.json.bak
+portfolio/*.bak
+
+# ── Execution / safety runtime ─────────────────────────────────────────────
+execution/safety_state.json
+execution/EMERGENCY_STOP
+trading/execution/safety_state.json
+
+# ── Caches, logs, data dumps ───────────────────────────────────────────────
+.cache/
+cache/
+logs/
+data/
+backtests/
+signals.csv
+dashboard_report.html
+*.db
+*.sqlite
+*.sqlite3
+
+# ── Python / tooling ───────────────────────────────────────────────────────
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+*.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+.coverage
+htmlcov/
+
+# ── Graphify / generated analysis ──────────────────────────────────────────
+graphify-out/
+**/graphify-out/
+
+# ── OS / editor ────────────────────────────────────────────────────────────
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
+
+# ── Local scratch ──────────────────────────────────────────────────────────
+/tmp_settle/
+*.tmp
+*.bak
+*.orig
+
+# Empty/local DBs (incl. filenames with trailing spaces on disk)
+*.db
+*.db 
+**/*.db
+**/*.db 
+paper_trading.db*
+trading.db*
+learning/*.db*
+learning/test_export.json
+trading/learning/*.db*

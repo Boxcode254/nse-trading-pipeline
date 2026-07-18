@@ -1,0 +1,1 @@
+"""CSV-backed signal storage."""
