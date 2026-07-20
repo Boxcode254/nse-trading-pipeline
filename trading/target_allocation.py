@@ -125,6 +125,27 @@ CASH_RESERVE_PCT = 10.0     # Keep at least this % in cash
 # Invested sector targets must sum to (100 - CASH_RESERVE_PCT)
 TARGET_INVESTED_PCT = 100.0 - CASH_RESERVE_PCT  # 90.0
 
+# ── Concentration guardrails ───────────────────────────────────────────────
+# HIGH side: a single sector must not exceed these ceilings.
+#   WARN at 55% — flag for review, still allowed.
+#   HARD at 60% — the rebalancer MUST trim (a trim trade is forced) and NO
+#     new BUY into that sector is permitted until back under the cap.
+# These are DELIBERATE choices (2026-07-20): the prior "50% sector cap" was
+# a report label only, never enforced, and banking naturally runs ~49% in a
+# 5-bank NSE universe. 60/55 leaves headroom for the intended allocation
+# (banking target 48.8 + 5 tol = 53.8 max) while circuit-breaking a real
+# blowout (e.g. banks +15% -> book drifts to 62%).
+SECTOR_CAP_WARN_PCT = 55.0
+SECTOR_CAP_HARD_PCT = 60.0
+
+# LOW side: every held, non-suspended position must sit in a sector whose
+# current weight is >= (target - tolerance). If a held position's sector is
+# below that floor AND no BUY/top-up was generated to fix it, that is a
+# FLOOR violation — the mirror-image guard to the orphan-exit rule. This
+# catches the "EABL silently zeroed" class: EABL had no sector at all, so
+# its sector weight is 0, far below any floor -> FLOOR violation fires
+# (while the orphan guard blocks the erroneous SELL).
+
 
 def _strategy_universe() -> set[str]:
     """All symbols that appear in the target STRATEGY stock lists."""
@@ -186,6 +207,105 @@ def max_sector_exposure_pct() -> float:
         float(cfg["target_pct"]) + float(cfg["tolerance"])
         for cfg in STRATEGY.values()
     )
+
+
+def validate_plan_constraints(
+    weights: dict[str, Any],
+    targets: dict[str, Any],
+    trades: list[dict[str, Any]],
+    portfolio: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Enforce concentration guardrails on a generated rebalance plan.
+
+    HIGH side (cap):
+      * Any sector whose current_pct > SECTOR_CAP_HARD_PCT -> "HARD_CAP"
+        violation; a trim trade MUST be present for it.
+      * Any sector whose current_pct > SECTOR_CAP_WARN_PCT -> "WARN_CAP"
+        violation (review flag, still actionable).
+    LOW side (floor):
+      * For every held, non-suspended position whose sector exists in the
+        strategy, if the sector's current_pct < (target - tolerance) AND no
+        BUY/top-up trade was generated for that sector -> "FLOOR" violation.
+      * A held, non-suspended position whose symbol is NOT in any sector's
+        stock list (orphaned, e.g. the EABL-drop class) -> its effective
+        sector weight is 0, which is below any floor; reported as "FLOOR"
+        with symbol + reason. The orphan-exit SELL for it is suppressed
+        separately by the SUSPENDED/strategy_universe guard.
+
+    Returns a list of violation dicts:
+        {level, kind, sector, symbol, current_pct, limit_pct, detail}
+    """
+    violations: list[dict[str, Any]] = []
+    sectors = targets.get("current", {})
+    strategy = get_strategy()
+    pos_map = {p["symbol"]: p for p in portfolio.get("positions", [])}
+    buy_sectors = {t["sector"] for t in trades if t["side"] == "BUY"}
+    # sectors that already have a trim (SELL) trade queued
+    trim_sectors = {t["sector"] for t in trades if t["side"] == "SELL"}
+
+    # ── HIGH side: sector concentration cap ──
+    for sec, info in sectors.items():
+        cur = info.get("current_pct", 0.0)
+        if cur > SECTOR_CAP_HARD_PCT:
+            violations.append({
+                "level": "error", "kind": "HARD_CAP", "sector": sec,
+                "symbol": None, "current_pct": round(cur, 2),
+                "limit_pct": SECTOR_CAP_HARD_PCT,
+                "detail": f"{sec} at {cur:.1f}% exceeds HARD cap "
+                          f"{SECTOR_CAP_HARD_PCT:.0f}% — trim required",
+            })
+            if sec not in trim_sectors:
+                violations.append({
+                    "level": "error", "kind": "HARD_CAP_NO_TRIM",
+                    "sector": sec, "symbol": None,
+                    "current_pct": round(cur, 2),
+                    "limit_pct": SECTOR_CAP_HARD_PCT,
+                    "detail": f"{sec} over HARD cap but no trim trade generated",
+                })
+        elif cur > SECTOR_CAP_WARN_PCT:
+            violations.append({
+                "level": "warn", "kind": "WARN_CAP", "sector": sec,
+                "symbol": None, "current_pct": round(cur, 2),
+                "limit_pct": SECTOR_CAP_WARN_PCT,
+                "detail": f"{sec} at {cur:.1f}% exceeds WARN cap "
+                          f"{SECTOR_CAP_WARN_PCT:.0f}% — review concentration",
+            })
+
+    # ── LOW side: held-position floor ──
+    for sym, pos in pos_map.items():
+        if sym in SUSPENDED:
+            continue  # suspended holdings intentionally excluded
+        # find which strategy sector (if any) this symbol belongs to
+        sec = None
+        for s, cfg in strategy.items():
+            if sym in (cfg.get("stocks") or []):
+                sec = s
+                break
+        if sec is None:
+            # Orphaned held position (no sector) -> effective weight 0.
+            violations.append({
+                "level": "error", "kind": "FLOOR", "sector": sec,
+                "symbol": sym, "current_pct": 0.0, "limit_pct": 0.0,
+                "detail": f"HELD {sym} has no target sector (orphaned) — "
+                          f"floor breach; would be force-sold by orphan-exit",
+            })
+            continue
+        info = sectors.get(sec, {})
+        cur = info.get("current_pct", 0.0)
+        tgt = info.get("target_pct", 0.0)
+        tol = info.get("tolerance", 0.0)
+        floor = tgt - tol
+        if cur < floor and sec not in buy_sectors:
+            violations.append({
+                "level": "warn", "kind": "FLOOR", "sector": sec,
+                "symbol": sym, "current_pct": round(cur, 2),
+                "limit_pct": round(floor, 2),
+                "detail": f"{sec} at {cur:.1f}% below floor {floor:.1f}% "
+                          f"and no BUY generated for {sym}",
+            })
+    return violations
+
+
 
 
 def _load_portfolio() -> dict[str, Any]:
@@ -534,6 +654,9 @@ def generate_rebalance_plan(
     for sec, info in targets["current"].items():
         if info["action"] not in ("add",):
             continue
+        # Concentration guard: never ADD to a sector already at/over HARD cap
+        if info.get("current_pct", 0.0) > SECTOR_CAP_HARD_PCT:
+            continue
         for sym in info["stocks_in_sector"]:
             if sym in current_stocks:
                 continue  # Already holding — allocation covers it
@@ -570,6 +693,9 @@ def generate_rebalance_plan(
     # === Holdings in under-weight sectors that we already own: top-up ===
     for sec, info in targets["current"].items():
         if info["action"] != "add":
+            continue
+        # Concentration guard: never ADD to a sector already at/over HARD cap
+        if info.get("current_pct", 0.0) > SECTOR_CAP_HARD_PCT:
             continue
         for sym in info["stocks_in_sector"]:
             if sym not in current_stocks:
@@ -651,6 +777,9 @@ def generate_rebalance_plan(
     buy_value = sum(t["value"] for t in trades if t["side"] == "BUY")
     sell_value = sum(t["value"] for t in trades if t["side"] == "SELL")
 
+    # Concentration guardrails (high cap + low floor)
+    violations = validate_plan_constraints(weights, targets, trades, portfolio)
+
     return {
         "trades": trades,
         "summary": {
@@ -662,6 +791,7 @@ def generate_rebalance_plan(
             "qty_mode": "delta",
         },
         "targets": targets,
+        "violations": violations,
     }
 
 
