@@ -30,7 +30,7 @@ VERIFICATION_TOLERANCE_PCT = 3.0
 # We only care about our tracked stocks + a few extras
 WATCH_SYMBOLS = {
     "SCOM", "KCB", "EQTY", "EABL", "ABSA", "SCBK",
-    "COOP", "KPLC", "TOTL", "KNRE", "WTK", "BAMB",
+    "COOP", "KPLC", "TOTL", "KNRE", "WTK",
 }
 
 

@@ -75,36 +75,43 @@ STRATEGY: dict[str, dict[str, Any]] = {
     # Sector weights are % of TOTAL portfolio and sum to (100 - CASH_RESERVE).
     # Cash reserve is held outside these buckets so both can be feasible.
     "banking": {
-        "target_pct": 45.0,
+        "target_pct": 52.60,
         "tolerance": 5.0,
         "stocks": ["KCB", "EQTY", "ABSA", "SCBK", "COOP"],
         "rationale": "P/E 6.2x with 17.9% ROE — cheapest sector, best yield",
     },
     "telecom": {
-        "target_pct": 14.0,
+        "target_pct": 16.36,
         "tolerance": 3.0,
         "stocks": ["SCOM"],
         "rationale": "SCOM anchor at 14.9x P/E, 5.6% yield, limited upside from here",
     },
-    "manufacturing": {
-        "target_pct": 13.0,
+    "telecom": {
+        "target_pct": 16.36,
         "tolerance": 3.0,
-        "stocks": ["EABL", "BAMB"],
-        "rationale": "Consumer staples as defensive ballast in case of sell-off",
+        "stocks": ["SCOM"],
+        "rationale": "SCOM anchor at 14.9x P/E, 5.6% yield, limited upside from here",
     },
     "energy": {
-        "target_pct": 11.0,
+        "target_pct": 12.86,
         "tolerance": 3.0,
         "stocks": ["KPLC", "TOTL"],
         "rationale": "8.4% sector yield — income engine. KenGen at 7.0x P/E",
     },
     "insurance": {
-        "target_pct": 7.0,
+        "target_pct": 8.18,
         "tolerance": 2.0,
         "stocks": ["KNRE", "BRIT"],
         "rationale": "Recovery sector — Britam +73% YTD, sector P/E 6.4x",
     },
 }
+
+# --- Suspended securities (NSE suspension, delisting, etc.) ---
+# BAMB (Bamburi Cement) suspended from NSE since 28-Feb-2025 — Amsons
+# Group 96.54% buyout + CMA compulsory squeeze-out, heading to delisting.
+# MUST never be a rebalance candidate (buy/sell). Held 39 shares are kept
+# as a static, non-rebalanceable position in portfolio state only.
+SUSPENDED = {"BAMB"}
 
 # ── Execution Constraints ──────────────────────────────────────────────────
 MAX_DAILY_SHIFT_PCT = 5.0   # Max % of portfolio value to shift per day
@@ -610,6 +617,10 @@ def generate_rebalance_plan(
     strategy_uni = _strategy_universe()
     for sym, pos in pos_map.items():
         if sym in strategy_uni:
+            continue
+        # Never rebalance a SUSPENDED security (e.g. BAMB) — held shares
+        # stay as a static, non-tradable position; do NOT emit a SELL.
+        if sym in SUSPENDED:
             continue
         shares = int(pos.get("shares") or 0)
         if shares <= 0:
