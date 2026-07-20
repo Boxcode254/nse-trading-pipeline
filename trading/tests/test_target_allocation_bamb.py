@@ -48,9 +48,34 @@ def test_bamb_not_in_any_sector_stocks():
     assert "BAMB" in SUSPENDED, "BAMB must be in SUSPENDED sentinel"
 
 
-def test_bamb_not_in_strategy_universe():
+def test_held_non_suspended_positions_have_target():
+    """CRITICAL: every held position that is NOT suspended must have a
+    target weight. This is the guard that catches orphaned real holdings
+    (the bug where EABL was silently dropped and would be force-sold)."""
+    strat = get_strategy()
     uni = _strategy_universe()
-    assert "BAMB" not in uni, "BAMB must not be a rebalance candidate universe symbol"
+    state_path = ROOT / "portfolio" / "state.json"
+    if not state_path.exists():
+        pytest.skip("no live portfolio state.json")
+    state = json.loads(state_path.read_text())
+    for p in state.get("positions", []):
+        sym = p["symbol"]
+        if sym in SUSPENDED:
+            continue  # suspended holdings are intentionally excluded
+        assert sym in uni, (
+            f"HELD position {sym} has NO target weight and is not "
+            f"SUSPENDED — would be orphan-sold on next rebalance"
+        )
+
+
+def test_eabl_has_target_weight():
+    """EABL must retain manufacturing's remaining ~6.5% (not be orphaned)."""
+    strat = get_strategy()
+    eabl_sectors = [sec for sec, cfg in strat.items()
+                    if "EABL" in (cfg.get("stocks") or [])]
+    assert eabl_sectors, "EABL has no target sector"
+    assert abs(strat[eabl_sectors[0]]["target_pct"] - 6.50) < 0.1, \
+        f"EABL target {strat[eabl_sectors[0]]['target_pct']}, expected ~6.50"
 
 
 def test_bamb_never_in_rebalance_trades():

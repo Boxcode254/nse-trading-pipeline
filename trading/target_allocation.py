@@ -74,35 +74,40 @@ SECTOR_MAP: dict[str, str] = dict(config.SECTOR_MAP)
 STRATEGY: dict[str, dict[str, Any]] = {
     # Sector weights are % of TOTAL portfolio and sum to (100 - CASH_RESERVE).
     # Cash reserve is held outside these buckets so both can be feasible.
+    # BAMB (suspended NSE 28-Feb-2025) was removed from manufacturing;
+    # its ~6.5% was redistributed proportionally to the other 4 sectors
+    # (factor 83.5/77 = 1.08442). EABL keeps manufacturing's remaining
+    # ~6.5% as its own single-stock "consumer" sector.
     "banking": {
-        "target_pct": 52.60,
+        "target_pct": 48.80,
         "tolerance": 5.0,
         "stocks": ["KCB", "EQTY", "ABSA", "SCBK", "COOP"],
         "rationale": "P/E 6.2x with 17.9% ROE — cheapest sector, best yield",
     },
     "telecom": {
-        "target_pct": 16.36,
-        "tolerance": 3.0,
-        "stocks": ["SCOM"],
-        "rationale": "SCOM anchor at 14.9x P/E, 5.6% yield, limited upside from here",
-    },
-    "telecom": {
-        "target_pct": 16.36,
+        "target_pct": 15.18,
         "tolerance": 3.0,
         "stocks": ["SCOM"],
         "rationale": "SCOM anchor at 14.9x P/E, 5.6% yield, limited upside from here",
     },
     "energy": {
-        "target_pct": 12.86,
+        "target_pct": 11.93,
         "tolerance": 3.0,
         "stocks": ["KPLC", "TOTL"],
         "rationale": "8.4% sector yield — income engine. KenGen at 7.0x P/E",
     },
     "insurance": {
-        "target_pct": 8.18,
+        "target_pct": 7.59,
         "tolerance": 2.0,
         "stocks": ["KNRE", "BRIT"],
         "rationale": "Recovery sector — Britam +73% YTD, sector P/E 6.4x",
+    },
+    "consumer": {
+        "target_pct": 6.50,
+        "tolerance": 3.0,
+        "stocks": ["EABL"],
+        "rationale": "EABL retains manufacturing's remaining ~6.5% after BAMB "
+                     "suspension; consumer-staples defensive ballast",
     },
 }
 
