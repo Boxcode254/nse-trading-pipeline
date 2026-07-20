@@ -156,8 +156,12 @@ SECTOR_MAP: dict[str, str] = {
     "ABSA": "banking",
     "SCBK": "banking",
     "COOP": "banking",
-    "EABL": "manufacturing",
-    "BAMB": "manufacturing",
+    # EABL kept manufacturing's remaining share as its own "consumer"
+    # sector after BAMB excision (2026-07-20). Must match STRATEGY sector
+    # vocabulary in target_allocation.py or compute_sector_weights buckets
+    # it into a phantom sector and the floor guard misfires.
+    "EABL": "consumer",
+    "BAMB": "consumer",  # suspended NSE 28-Feb-2025; classified for reporting only
     "KPLC": "energy",
     "TOTL": "energy",
     "KNRE": "insurance",
@@ -255,7 +259,7 @@ ASSET_CATEGORIES: dict[str, dict[str, str]] = {
     "SCOM": {"category": "equities", "sector": "telecom",  "display": "Safaricom"},
     "KCB":  {"category": "equities", "sector": "banking",  "display": "KCB"},
     "EQTY": {"category": "equities", "sector": "banking",  "display": "Equity"},
-    "EABL": {"category": "equities", "sector": "manufacturing", "display": "EABL"},
+    "EABL": {"category": "equities", "sector": "consumer", "display": "EABL"},
     "ABSA": {"category": "equities", "sector": "banking",  "display": "Absa"},
     "SCBK": {"category": "equities", "sector": "banking",  "display": "Stanchart"},
     "COOP": {"category": "equities", "sector": "banking",  "display": "Co-op Bank"},
@@ -263,7 +267,7 @@ ASSET_CATEGORIES: dict[str, dict[str, str]] = {
     "TOTL": {"category": "equities", "sector": "energy",   "display": "TotalEnergies"},
     "KNRE": {"category": "equities", "sector": "insurance","display": "Kenya Re"},
     "WTK":  {"category": "equities", "sector": "services", "display": "WPP ScanGroup"},
-    "BAMB": {"category": "equities", "sector": "manufacturing", "display": "Bamburi"},
+    "BAMB": {"category": "equities", "sector": "consumer", "display": "Bamburi"},
     # Forex — major + KES crosses
     "EUR/USD": {"category": "forex", "sector": "major",     "display": "EUR/USD"},
     "USD/KES": {"category": "forex", "sector": "em-fx",     "display": "USD/KES"},

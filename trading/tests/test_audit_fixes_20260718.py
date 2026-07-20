@@ -184,17 +184,19 @@ def test_orphan_wtk_gets_full_exit_in_plan():
 
 
 def test_canonical_sector_map_aligned():
-    assert config.SECTOR_MAP["EABL"] == "manufacturing"
+    # After BAMB excision (2026-07-20) EABL kept manufacturing's remaining
+    # share as its own "consumer" sector. All sector vocabularies must agree.
+    assert config.SECTOR_MAP["EABL"] == "consumer"
     assert config.SECTOR_MAP["KPLC"] == "energy"
-    assert config.get_sector("EABL") == "manufacturing"
+    assert config.get_sector("EABL") == "consumer"
     assert config.get_sector("KPLC") == "energy"
-    assert _sector_of("EABL") == "manufacturing"
+    assert _sector_of("EABL") == "consumer"
     assert _sector_of("KPLC") == "energy"
     # target_allocation re-exports same map
     assert TA_SECTOR_MAP["EABL"] == config.SECTOR_MAP["EABL"]
     assert TA_SECTOR_MAP["KPLC"] == config.SECTOR_MAP["KPLC"]
     # ASSET_CATEGORIES aligned
-    assert config.ASSET_CATEGORIES["EABL"]["sector"] == "manufacturing"
+    assert config.ASSET_CATEGORIES["EABL"]["sector"] == "consumer"
     assert config.ASSET_CATEGORIES["KPLC"]["sector"] == "energy"
 
 
