@@ -33,6 +33,7 @@ from .safety import SafetyEngine
 from .engine import ExecutionEngine
 from .order_store import OrderStore
 from .circuit_breaker import CircuitBreaker
+from .macro_breaker import MacroBreaker, MacroBreakerError, MacroSnapshot
 from .retry import call_with_timeout, with_exponential_backoff, execute_resilient
 from .alerting import alert, log_alert, send_telegram
 from .run_lock import RunLock
@@ -52,6 +53,9 @@ __all__ = [
     "is_open",
     "OrderStore",
     "CircuitBreaker",
+    "MacroBreaker",
+    "MacroBreakerError",
+    "MacroSnapshot",
     "RunLock",
     "call_with_timeout",
     "with_exponential_backoff",

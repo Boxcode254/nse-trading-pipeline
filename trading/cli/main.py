@@ -395,6 +395,69 @@ def execute_reset_daily(
     raise typer.Exit(execute.reset_daily_cmd(quiet=quiet, as_json=as_json))
 
 
+@execute_app.command("drawdown-status")
+def execute_drawdown_status(
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON."),
+) -> None:
+    """Show the portfolio drawdown halt state."""
+    raise typer.Exit(execute.drawdown_status_cmd(as_json=as_json))
+
+
+@execute_app.command("drawdown-release")
+def execute_drawdown_release(
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON."),
+) -> None:
+    """Release the drawdown halt (operator acknowledgement)."""
+    raise typer.Exit(execute.drawdown_release_cmd(as_json=as_json))
+
+
+@execute_app.command("drawdown-sync")
+def execute_drawdown_sync(
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON."),
+) -> None:
+    """Sync the live MTM equity-curve drawdown into the safety gate."""
+    raise typer.Exit(execute.drawdown_sync_cmd(as_json=as_json))
+
+
+@execute_app.command("macro-status")
+def execute_macro_status(
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON."),
+) -> None:
+    """Show the macro / volatility circuit breaker state."""
+    raise typer.Exit(execute.macro_status_cmd(as_json=as_json))
+
+
+@execute_app.command("macro-feed")
+def execute_macro_feed(
+    index_change_pct: Optional[float] = typer.Option(None, "--index-change", "-i", help="NSE index % change today."),
+    advancers: Optional[int] = typer.Option(None, "--advancers", "-a", help="Number of advancing stocks."),
+    decliners: Optional[int] = typer.Option(None, "--decliners", "-d", help="Number of declining stocks."),
+    vol_pct: Optional[float] = typer.Option(None, "--vol", help="Trailing annualised volatility %."),
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON."),
+) -> None:
+    """Feed a macro snapshot into the breaker (manual operator input)."""
+    raise typer.Exit(execute.macro_feed_cmd(
+        index_change_pct=index_change_pct, advancers=advancers,
+        decliners=decliners, vol_pct=vol_pct, as_json=as_json,
+    ))
+
+
+@execute_app.command("macro-release")
+def execute_macro_release(
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON."),
+) -> None:
+    """Release (reset) the macro circuit breaker."""
+    raise typer.Exit(execute.macro_release_cmd(as_json=as_json))
+
+
+@execute_app.command("macro-snapshot")
+def execute_macro_snapshot(
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON."),
+) -> None:
+    """Generate a macro snapshot from live prices + feed the breaker."""
+    raise typer.Exit(execute.macro_snapshot_cmd(as_json=as_json))
+
+
 @execute_app.command("plan")
 def execute_plan(
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Minimal output."),

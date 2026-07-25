@@ -3,4 +3,4 @@
 # stdout is delivered verbatim as the end-of-day report
 
 cd ~/.trading || exit 1
-exec .venv/bin/python -m trading.auto_trader 2>&1
+exec sudo -u trading HOME="$HOME" .venv/bin/python -m trading.auto_trader 2>&1

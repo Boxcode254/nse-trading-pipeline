@@ -38,6 +38,32 @@ def _round2(val: Optional[float]) -> Optional[float]:
     return round(val, 2) if val is not None else None
 
 
+def _load_axys_overrides() -> tuple[frozenset[str], dict[str, float]]:
+    """Return (price_flagged_symbols, {symbol: axys_close}) from the most
+    recent axys_closes_<date>.json (today, else up to 3 days back).
+
+    Used so AXYS-vs-NSE official-close corrections survive the regular MTM
+    refresh, which would otherwise overwrite them with pipeline feed prices.
+    Flips are intentionally excluded (monitor-only). Returns empty if none.
+    """
+    import datetime as _dt
+    try:
+        for back in range(0, 4):
+            d = (_dt.date.today() - _dt.timedelta(days=back)).isoformat()
+            path = PORTFOLIO_DIR / f"axys_closes_{d}.json"
+            if path.exists():
+                data = json.loads(path.read_text())
+                flags = frozenset(
+                    r["symbol"] for r in data.get("rows", [])
+                    if "PRICE" in (r.get("flag") or "")
+                )
+                close = {k: float(v) for k, v in data.get("axys", {}).items()}
+                return flags, close
+    except Exception:
+        pass
+    return frozenset(), {}
+
+
 def update_portfolio() -> dict[str, Any]:
     """Read portfolio, fetch live prices, compute PnL, save mtm snapshot.
 
@@ -51,6 +77,9 @@ def update_portfolio() -> dict[str, Any]:
     portfolio: dict[str, Any] = json.loads(STATE_PATH.read_text())
     positions = portfolio.get("positions", [])
     symbols = [p["symbol"] for p in positions]
+
+    # AXYS reconciliation overrides (survive refresh) — see _load_axys_overrides
+    _axys_flags, _axys_close = _load_axys_overrides()
 
     # Fetch live prices (cached 5 min internally)
     prices = fetch_prices(symbols)
@@ -73,6 +102,13 @@ def update_portfolio() -> dict[str, Any]:
         current_value = round(shares * live_price, 2) if live_price else None
         pnl = round(current_value - cost, 2) if current_value else None
         pnl_pct = round(((live_price - avg_cost) / avg_cost) * 100, 2) if live_price and avg_cost else None
+
+        # Apply AXYS price override for names flagged vs NSE official close
+        if sym in _axys_flags and sym in _axys_close:
+            live_price = _axys_close[sym]
+            current_value = round(shares * live_price, 2) if live_price else None
+            pnl = round(current_value - cost, 2) if current_value else None
+            pnl_pct = round(((live_price - avg_cost) / avg_cost) * 100, 2) if live_price and avg_cost else None
 
         enriched_positions.append({
             "symbol": sym,

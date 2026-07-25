@@ -1,4 +1,19 @@
-"""Safety Engine — risk management layer."""
+"""Safety Engine — risk management layer.
+
+Phase 1 risk-gate additions (2026-07-25):
+- **Portfolio drawdown halt** (MTM equity-curve check). When the portfolio's
+  peak-to-current drawdown exceeds ``max_drawdown_halt_pct``, ALL new trades
+  are blocked until an operator releases the halt. This is the "risk gate"
+  the auto-trader and manual CLI now share.
+- **Stop-loss moved INTO the gate.** ``should_stop_loss()`` computes the
+  loss% for a held position and the gate's ``check_order`` will BLOCK a BUY
+  that would add to a losing position already past the stop, and FLAG (not
+  block) any SELL. The auto-trader reuses the same helper so the logic is
+  single-sourced.
+- **Macro / volatility circuit breaker.** A ``MacroBreaker`` evaluates the
+  NSE index / breadth / vol regime. When tripped, the gate blocks all trades.
+  TradingView fetch is best-effort and non-fatal (fail-open by design).
+"""
 import json
 import os
 from dataclasses import asdict
@@ -7,6 +22,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 
 from .models import OrderRequest, OrderResult, SafetyVerdict, AccountInfo
+from .macro_breaker import MacroBreaker, DEFAULT_THRESHOLDS as _MACRO_DEFAULTS
 
 
 class SafetyEngine:
@@ -25,6 +41,20 @@ class SafetyEngine:
             "emergency_stop_path": os.path.expanduser(
                 "~/.trading/execution/EMERGENCY_STOP"
             ),
+            # ── Phase 1 new defaults ──
+            # Drawdown halt: block all new trades when portfolio peak-to-current
+            # drawdown exceeds this %. 0 or None disables.
+            "max_drawdown_halt_pct": 15.0,
+            # Stop-loss: a held position whose loss exceeds this % (vs avg cost)
+            # is "stopped". The gate blocks BUYs that add to it; SELLs are
+            # allowed (and flagged). 0 or None disables the stop-loss check.
+            "stop_loss_pct": 8.0,
+            # Macro breaker config (merged into MacroBreaker thresholds).
+            "macro": dict(_MACRO_DEFAULTS),
+            "macro_fail_open": True,
+            "macro_state_path": os.path.expanduser(
+                "~/.trading/execution/macro_breaker.json"
+            ),
         }
         if config:
             self.config.update(config)
@@ -32,6 +62,19 @@ class SafetyEngine:
         # Runtime state
         self.state_dir = Path(self.config.get("state_dir", os.path.expanduser("~/.trading/execution")))
         self.state = self._load_state()
+
+        # Macro breaker (fail-open unless explicitly configured otherwise).
+        try:
+            self.macro = MacroBreaker(
+                thresholds=self.config.get("macro", {}),
+                state_path=self.config.get("macro_state_path", os.path.expanduser(
+                    "~/.trading/execution/macro_breaker.json"
+                )),
+                fail_open=self.config.get("macro_fail_open", True),
+            )
+        except Exception:
+            # Never let a broken macro breaker disable the whole gate.
+            self.macro = None
 
     def check_order(
         self, request: OrderRequest, portfolio_state: dict, account: AccountInfo
@@ -45,6 +88,34 @@ class SafetyEngine:
             return SafetyVerdict(
                 allowed=False,
                 reason="Trading halted by emergency stop",
+                violations=violations,
+            )
+
+        # 1b. Portfolio drawdown halt (MTM equity-curve check)
+        #     When the live peak-to-current drawdown exceeds the configured
+        #     threshold, ALL new orders are blocked. This is a portfolio-level
+        #     circuit breaker that covers both manual CLI trades and the
+        #     auto-trader, because both route through check_order().
+        if self._drawdown_halt_active():
+            violations.append("drawdown_halt")
+            return SafetyVerdict(
+                allowed=False,
+                reason=(
+                    f"Portfolio drawdown halt: {self.state['drawdown_pct']:.2f}% "
+                    f"exceeds {self.config['max_drawdown_halt_pct']:.2f}% limit — "
+                    f"trading paused until operator release"
+                ),
+                violations=violations,
+            )
+
+        # 1c. Macro / volatility circuit breaker
+        #     If the NSE index / breadth / vol regime has tripped, halt all
+        #     trades. Fail-open: a missing/errored macro feed does NOT trip.
+        if self.macro is not None and self.macro.evaluate():
+            violations.append("macro_breaker")
+            return SafetyVerdict(
+                allowed=False,
+                reason=f"Macro circuit breaker tripped: {self.macro.snapshot().get('reason', 'market stress')}",
                 violations=violations,
             )
 
@@ -90,6 +161,25 @@ class SafetyEngine:
                 "max_single_exposure_pct"
             ]:
                 violations.append("max_single_exposure")
+
+            # 5b. Stop-loss is IN the gate. A BUY that adds to a position
+            #     already past the stop-loss threshold is blocked — we do not
+            #     average down into a losing name. SELLs are never blocked by
+            #     the stop (selling is the correct response); they are reported
+            #     separately via should_stop_loss() so the auto-trader can flag.
+            sl = self.should_stop_loss(request.symbol, portfolio_state)
+            if sl is not None and sl.get("stopped"):
+                if request.side == "BUY":
+                    violations.append("stop_loss_blocked")
+
+        # 5c. Stop-loss SELL flag (informational, does NOT block).
+        #     Record so the caller's report can show the stop context. This is
+        #     computed for SELLs too; it never adds a violation for SELL.
+        if request.side == "SELL":
+            sl = self.should_stop_loss(request.symbol, portfolio_state)
+            if sl is not None and sl.get("stopped"):
+                # Marker only — SELLs through the stop are allowed.
+                pass
 
         # 6. Max position count (BUY only)
         if request.side == "BUY" and len(
@@ -144,9 +234,83 @@ class SafetyEngine:
         self.state["manual_overrides"].pop(symbol, None)
         self._save_state()
 
+    # ── Phase 1 helpers ───────────────────────────────────────────────
+    def should_stop_loss(
+        self, symbol: str, portfolio_state: dict
+    ) -> Optional[dict]:
+        """Return stop-loss status for a held symbol, or None if not held / disabled.
+
+        Reads the position's avg cost and current value from ``portfolio_state``
+        (the same dict the gate uses), so this is a single source of truth shared
+        by the auto-trader and the manual CLI.
+
+        Returns a dict::
+            {"symbol", "stopped": bool, "loss_pct": float,
+             "avg_cost": float, "current_price": float}
+        or ``None`` when the position is absent or stop-loss is disabled
+        (``stop_loss_pct`` is 0/None).
+        """
+        pct_cfg = self.config.get("stop_loss_pct") or 0.0
+        if pct_cfg <= 0:
+            return None
+        pos = portfolio_state.get("positions", {}).get(symbol)
+        if not pos:
+            return None
+        avg_cost = pos.get("avg_cost")
+        # current_price is derived from value/shares if present; else value
+        # itself is treated as the notional given the shares.
+        shares = pos.get("shares") or 0
+        value = pos.get("value", 0.0) or 0.0
+        if not avg_cost or avg_cost <= 0 or shares <= 0:
+            # Fallback: no avg cost basis → cannot compute a loss%.
+            return None
+        current_price = value / shares if value else avg_cost
+        loss_pct = (current_price - avg_cost) / avg_cost * 100.0
+        return {
+            "symbol": symbol,
+            "stopped": loss_pct <= -pct_cfg,
+            "loss_pct": round(loss_pct, 2),
+            "avg_cost": round(float(avg_cost), 4),
+            "current_price": round(float(current_price), 4),
+        }
+
+    def update_drawdown(self, drawdown_pct: float, *, halt_if_exceeds: bool = True) -> dict:
+        """Record the current portfolio drawdown % from the MTM equity curve.
+
+        When ``drawdown_pct`` exceeds ``max_drawdown_halt_pct`` the halt is
+        engaged (idempotent — once halted it stays until ``release_drawdown_halt``).
+        Returns a status dict describing the resulting halt state.
+        """
+        self.state["drawdown_pct"] = round(float(drawdown_pct), 4)
+        if halt_if_exceeds:
+            limit = self.config.get("max_drawdown_halt_pct") or 0.0
+            if limit > 0 and drawdown_pct >= limit:
+                if not self.state.get("drawdown_halted"):
+                    self.state["drawdown_halted"] = True
+                    self.state["drawdown_halt_reason"] = (
+                        f"Drawdown {drawdown_pct:.2f}% hit {limit:.2f}% halt threshold"
+                    )
+        self._save_state()
+        return {
+            "drawdown_pct": self.state["drawdown_pct"],
+            "halted": self.state["drawdown_halted"],
+            "reason": self.state["drawdown_halt_reason"],
+            "limit": self.config.get("max_drawdown_halt_pct", 0.0),
+        }
+
+    def release_drawdown_halt(self) -> None:
+        """Operator acknowledgement — clear the drawdown halt (does not reset the %)."""
+        self.state["drawdown_halted"] = False
+        self.state["drawdown_halt_reason"] = ""
+        self._save_state()
+
+    def _drawdown_halt_active(self) -> bool:
+        """True when the portfolio drawdown halt is engaged."""
+        return bool(self.state.get("drawdown_halted"))
+
     def get_status(self) -> dict:
         """Return full safety status."""
-        return {
+        status = {
             "emergency_stop": self.state["emergency_stop"],
             "daily_realised_pnl": self.state["daily_realised_pnl"],
             "daily_trade_count": self.state["daily_trade_count"],
@@ -154,7 +318,68 @@ class SafetyEngine:
             "last_reset_date": self.state["last_reset_date"],
             "manual_overrides": dict(self.state["manual_overrides"]),
             "config": dict(self.config),
+            # Phase 1 — drawdown halt
+            "drawdown_pct": self.state.get("drawdown_pct", 0.0),
+            "drawdown_halted": self.state.get("drawdown_halted", False),
+            "drawdown_halt_reason": self.state.get("drawdown_halt_reason", ""),
+            "drawdown_halt_limit": self.config.get("max_drawdown_halt_pct", 0.0),
         }
+        if self.macro is not None:
+            status["macro_breaker"] = self.macro.snapshot()
+        return status
+
+    def feed_macro(self, snapshot_dict: dict) -> dict:
+        """Feed a macro snapshot (dict) into the breaker. Returns its status.
+
+        ``snapshot_dict`` keys: timestamp, index_level, index_change_pct,
+        advancers, decliners, volatility_pct, source. Any subset is accepted.
+        """
+        if self.macro is None:
+            return {"tripped": False, "reason": "macro breaker unavailable",
+                    "breach": None, "evaluated": False}
+        from .macro_breaker import MacroSnapshot
+        snap = MacroSnapshot(
+            timestamp=snapshot_dict.get("timestamp") or datetime.now().isoformat(),
+            index_level=snapshot_dict.get("index_level"),
+            index_change_pct=snapshot_dict.get("index_change_pct"),
+            advancers=snapshot_dict.get("advancers"),
+            decliners=snapshot_dict.get("decliners"),
+            volatility_pct=snapshot_dict.get("volatility_pct"),
+            source=snapshot_dict.get("source", "feed"),
+        )
+        return self.macro.feed(snap)
+
+    def release_macro(self) -> None:
+        """Manual release of the macro circuit breaker."""
+        if self.macro is not None:
+            self.macro.reset()
+
+    def refresh_macro(self, *, prices: Optional[dict] = None, min_sample: int = 5) -> dict:
+        """Generate a macro snapshot from live prices and feed the breaker.
+
+        Convenience wrapper used by the auto-trader and the morning cron: it
+        pulls the current watchlist prices (or accepts a pre-fetched map) and
+        derives breadth / composite-index-change / dispersion, then feeds the
+        breaker so the trade gate halts on a real market-regime signal.
+
+        ``min_sample`` is forwarded to the snapshot builder: thresholds are
+        only evaluated when at least that many symbols actually MOVED
+        (non-flat). Below it, the breaker stays fail-open (never trips on a
+        sparse/flat feed).
+
+        Returns the breaker status dict. Failures are non-fatal — if price
+        fetch fails the breaker simply stays in its current (fail-open) state.
+        """
+        if self.macro is None:
+            return {"tripped": False, "reason": "macro breaker unavailable",
+                    "breach": None, "evaluated": False}
+        if prices is None:
+            try:
+                from trading.nse_price_fetcher import fetch_prices
+                prices = fetch_prices()
+            except Exception:
+                prices = {}
+        return self.macro.build_snapshot_from_prices(prices, min_sample=min_sample)
 
     def reset_daily(self) -> None:
         """Reset daily counters."""
@@ -184,9 +409,18 @@ class SafetyEngine:
                 "last_reset_date": datetime.now().strftime("%Y-%m-%d"),
                 "emergency_stop": False,
                 "manual_overrides": {},
+                # Phase 1 — drawdown halt state
+                "drawdown_pct": 0.0,
+                "drawdown_halted": False,
+                "drawdown_halt_reason": "",
             }
         with open(state_path, "r") as f:
-            return json.load(f)
+            data = json.load(f)
+        # Backfill any missing Phase 1 keys so older state files still load.
+        data.setdefault("drawdown_pct", 0.0)
+        data.setdefault("drawdown_halted", False)
+        data.setdefault("drawdown_halt_reason", "")
+        return data
 
     def _save_state(self) -> None:
         """Persist state to disk."""

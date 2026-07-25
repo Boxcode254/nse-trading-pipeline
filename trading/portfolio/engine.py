@@ -239,6 +239,16 @@ def _write_json(path: Path, payload: Any) -> None:
     with open(tmp, "w") as f:
         json.dump(payload, f, indent=2, sort_keys=True, default=str)
     os.replace(tmp, path)
+    # Lock permissions: owner rw, group read-only so portfolio.engine
+    # (running as trading user) can write and hermes user can read.
+    # Group is inherited from the parent directory so both users can access.
+    try:
+        os.chmod(path, 0o640)
+        parent_gid = path.parent.stat().st_gid
+        if path.stat().st_gid != parent_gid:
+            os.chown(path, -1, parent_gid)
+    except OSError:
+        pass  # best-effort; don't break writes if hardening fails
 
 
 # ── Public API ────────────────────────────────────────────────────────────
@@ -335,9 +345,57 @@ def _append_transaction(txn: Transaction, dir_path: Optional[str] = None) -> Non
     _write_json(_txn_path(dir_path), [t.to_dict() for t in log])
 
 
+def _log_state_change(
+    before: dict | None,
+    after: dict,
+    dir_path: Optional[str] = None,
+) -> None:
+    """Append a one-line diff to the state-change journal.
+
+    Format (grepable, one entry per write):
+        TS | cash: B→A | positions: N→N | delta: +SYM(k),-SYM(k) | caller: ?
+    """
+    now = _now_iso()
+    cash_b = before["cash"] if before else 0
+    cash_a = after["cash"]
+    pos_b = {p["symbol"]: p["shares"] for p in (before.get("positions", []) if before else [])}
+    pos_a = {p["symbol"]: p["shares"] for p in after.get("positions", [])}
+
+    added = [f"+{s}({pos_a[s]})" for s in pos_a if s not in pos_b]
+    removed = [f"-{s}" for s in pos_b if s not in pos_a]
+    delta = " ".join(added + removed) if (added or removed) else "─"
+
+    log_line = (
+        f"{now} | cash: {cash_b}→{cash_a} | "
+        f"positions: {len(pos_b)}→{len(pos_a)} | "
+        f"delta: {delta}"
+    )
+
+    log_path = Path(dir_path or _default_portfolio_dir()) / "state_changes.log"
+    try:
+        with open(log_path, "a") as f:
+            f.write(log_line + "\n")
+    except OSError:
+        pass  # best-effort; don't break writes if logging fails
+
+
 def _save_state(state: PortfolioState, dir_path: Optional[str] = None) -> None:
     state.updated_at = _now_iso()
-    _write_json(_state_path(dir_path), state.to_dict())
+    state_path = _state_path(dir_path)
+
+    # Load previous state for diff logging
+    prev: dict | None = None
+    if state_path.exists():
+        try:
+            with open(state_path) as f:
+                prev = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    _write_json(state_path, state.to_dict())
+
+    # Log before/after diff to state_changes.log
+    _log_state_change(prev, state.to_dict(), dir_path)
 
 
 # ── Trading primitives ────────────────────────────────────────────────────

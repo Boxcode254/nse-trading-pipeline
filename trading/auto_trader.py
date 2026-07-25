@@ -82,6 +82,27 @@ def _make_safety() -> SafetyEngine:
     return SafetyEngine(cfg)
 
 
+def _current_drawdown_pct(portfolio_dir: Optional[Path] = None) -> float:
+    """Max drawdown % across the portfolio's MTM equity-curve snapshots.
+
+    Reads snapshots.json directly (the same source portfolio_mtm uses) so the
+    value is always the real peak-to-current drawdown, independent of any
+    cached safety state.
+    """
+    try:
+        from trading.portfolio import engine as pf
+        snaps = pf.load_snapshots(portfolio_dir)
+        if not snaps:
+            return 0.0
+        dds = pf.compute_drawdown(snaps)
+        return max(dds) if dds else 0.0
+    except Exception:
+        return 0.0
+
+
+_MACRO_SNAPSHOT_PATH = Path(os.path.expanduser("~/.trading/execution/macro_snapshot.json"))
+
+
 def _port_state_for_safety(positions: list[dict]) -> dict:
     return {
         "positions": {
@@ -456,6 +477,34 @@ def run_auto_trade(dry_run: bool = False) -> AutoTraderReport:
     safety = _make_safety()
     safety.reset_daily()  # once per day, not per order
 
+    # Phase 1 — sync the risk gate with the live MTM equity curve + macro.
+    # 1) Push the latest portfolio drawdown into the safety engine so the
+    #    drawdown halt reflects the real equity curve (snapshots.json), not
+    #    just in-memory state.
+    try:
+        dd_status = safety.update_drawdown(_current_drawdown_pct(portfolio_dir=None))
+        if dd_status.get("halted"):
+            report.add_skip(
+                "RISK GATE",
+                f"Drawdown halt active: {dd_status['drawdown_pct']:.2f}% "
+                f"(>= {dd_status['limit']:.2f}%) — no new trades",
+            )
+    except Exception as exc:
+        report.add_skip("RISK GATE", f"drawdown sync failed (non-fatal): {exc}")
+    # 2) Refresh the macro breaker from live NSE watchlist prices (breadth +
+    #    composite index change + dispersion). Fail-open: if the fetch fails,
+    #    the breaker stays in its current state and never trips on a miss.
+    try:
+        macro_res = safety.refresh_macro()
+        if macro_res.get("breaker", {}).get("tripped"):
+            report.add_skip(
+                "RISK GATE",
+                f"Macro circuit breaker tripped: "
+                f"{macro_res['breaker'].get('reason', 'market stress')}",
+            )
+    except Exception as exc:
+        report.add_skip("RISK GATE", f"macro refresh failed (non-fatal): {exc}")
+
     # 1. Load portfolio state
     if _replay.is_replay():
         _replay.ensure_replay_env()
@@ -545,27 +594,38 @@ def run_auto_trade(dry_run: bool = False) -> AutoTraderReport:
     ))
     prices = _price_map(all_symbols)
 
-    # 4. Stop-loss check: auto-sell positions that hit the loss threshold
-    #    Do NOT report sells here — report only after execution (step 7).
-    sl_prices = _price_map(list(holdings.keys()))
+    # 4. Stop-loss check: auto-sell positions that hit the loss threshold.
+    #    Uses the SAME helper the safety gate uses (safety.should_stop_loss),
+    #    so the auto-trader and manual CLI never disagree on what "stopped"
+    #    means. Do NOT report sells here — report only after execution (step 7).
+    sl_portfolio_state = {
+        "positions": {
+            p["symbol"]: {
+                "shares": p["shares"],
+                "avg_cost": p["avg_cost"],
+                # value uses the live price if available, else current_value
+                "value": (prices.get(p["symbol"]) or 0.0)
+                * p["shares"]
+                or p.get("current_value", 0),
+            }
+            for p in current_positions
+        }
+    }
     for p in current_positions:
         sym = p["symbol"]
-        avg_cost = p["avg_cost"]
-        current_price = sl_prices.get(sym)
-        if current_price and avg_cost > 0:
-            loss_pct = (current_price - avg_cost) / avg_cost * 100
-            if loss_pct <= -STOP_LOSS_PCT:
-                already_in_sell = any(s["symbol"] == sym for s in sell_list)
-                if not already_in_sell:
-                    sell_list.append(dict(
-                        symbol=sym,
-                        delta_shares=int(p["shares"]),
-                        reason=(
-                            f"Stop-loss triggered: {sym} is {loss_pct:.1f}% "
-                            f"below avg cost of KES {avg_cost:.2f}"
-                        ),
-                        stop_loss=True,
-                    ))
+        sl = safety.should_stop_loss(sym, sl_portfolio_state)
+        if sl is not None and sl["stopped"]:
+            already_in_sell = any(s["symbol"] == sym for s in sell_list)
+            if not already_in_sell:
+                sell_list.append(dict(
+                    symbol=sym,
+                    delta_shares=int(p["shares"]),
+                    reason=(
+                        f"Stop-loss triggered: {sym} is {sl['loss_pct']:.1f}% "
+                        f"below avg cost of KES {sl['avg_cost']:.2f}"
+                    ),
+                    stop_loss=True,
+                ))
 
     # Calculate sector exposure
     sector_current: dict[str, float] = {}

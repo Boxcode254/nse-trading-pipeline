@@ -231,6 +231,21 @@ EXECUTION_CONFIG: dict[str, Any] = {
     "enabled": True,
     "default_broker": "paper",
     "state_dir": os.path.join(HOME, "execution"),
+    # ── Phase 1 risk-gate thresholds (2026-07-25) ──
+    # Block all new trades when the live MTM equity-curve drawdown hits this %.
+    "max_drawdown_halt_pct": 15.0,
+    # Stop-loss: a held position past this % loss (vs avg cost) blocks further
+    # BUYs (no averaging down); SELLs stay allowed and are flagged.
+    "stop_loss_pct": 8.0,
+    # Macro / volatility circuit breaker (NSE index / breadth / vol regime).
+    # Fail-open: a missing/errored macro feed never trips the breaker.
+    "macro_fail_open": True,
+    "macro": {
+        "index_drop_pct": 3.0,       # single-session NSE index drop that halts
+        "breadth_min_pct": 20.0,     # advancers% floor before broad-selloff halt
+        "vol_spike_multiple": 3.0,   # annualised vol ceiling (x100%) that halts
+        "cooldown_seconds": 86_400,  # 24h before an auto-reconsideration
+    },
 }
 
 

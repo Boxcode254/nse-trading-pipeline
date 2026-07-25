@@ -375,20 +375,58 @@ class ExecutionEngine:
         }
 
     def _get_portfolio_state(self) -> Dict[str, Any]:
-        """Build portfolio state dict from the broker."""
+        """Build portfolio state dict from the broker.
+
+        Includes ``avg_cost`` and ``shares`` per position so the safety gate's
+        stop-loss check (moved into SafetyEngine) can compute loss% using the
+        same data the auto-trader uses.
+        """
         try:
             account = self.broker.get_account()
             positions = self.broker.get_positions()
+            # PaperBroker exposes market_value/avg_cost; for other brokers we
+            # fall back to cost basis. We normalise to the gate-expected shape.
+            norm_positions: Dict[str, Any] = {}
+            for p in positions:
+                shares = getattr(p, "quantity", 0) or 0
+                # avg_cost from broker position if present, else derive from
+                # cost_basis/shares.
+                avg = getattr(p, "cost_basis", None)
+                if avg is not None and shares:
+                    avg = avg / shares
+                norm_positions[p.symbol] = {
+                    "shares": shares,
+                    "avg_cost": avg,
+                    "value": getattr(p, "market_value", 0.0) or 0.0,
+                }
             return {
                 "cash": account.cash,
-                "positions": {
-                    p.symbol: {"shares": p.quantity, "value": p.market_value}
-                    for p in positions
-                },
+                "positions": norm_positions,
                 "total_value": account.equity,
             }
         except Exception:
             return {}
+
+    def sync_risk_state(self) -> Dict[str, Any]:
+        """Push the live MTM drawdown into the safety gate.
+
+        Called by the market-close / MTM-refresh cron so the drawdown halt
+        tracks the real equity curve (``snapshots.json``), not just the
+        in-memory engine state. Returns the safety drawdown status.
+        """
+        if self.safety is None:
+            return {"drawdown_pct": 0.0, "halted": False}
+        drawdown_pct = 0.0
+        try:
+            from ..portfolio import engine as pf
+            snaps = pf.load_snapshots()
+            if snaps:
+                # compute_drawdown returns per-snapshot dd; latest is last.
+                dds = pf.compute_drawdown(snaps)
+                drawdown_pct = max(dds) if dds else 0.0
+        except Exception:
+            pass
+        return self.safety.update_drawdown(drawdown_pct)
 
 
 def _order_result_from_record(rec: dict) -> OrderResult:

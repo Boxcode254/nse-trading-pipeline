@@ -286,17 +286,168 @@ def override_cmd(
 
 def reset_daily_cmd(
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Minimal output."),
-    as_json: bool = typer.Option(False, "--json", help="Emit JSON."),
+    as_json: Optional[bool] = typer.Option(False, "--json", help="Emit JSON."),
 ) -> int:
     """Manually reset daily counters."""
     engine = ExecutionEngine(PaperBroker(), SafetyEngine())
     engine.safety.reset_daily()
-    
+
     if as_json:
         print(json.dumps({"status": "daily_counters_reset"}, indent=2))
         return 0
-    
+
     print("✅ Daily counters reset")
+    return 0
+
+
+# ── Phase 1: Drawdown halt ───────────────────────────────────────────────
+def drawdown_status_cmd(
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON."),
+) -> int:
+    """Show the portfolio drawdown halt state."""
+    engine = ExecutionEngine(PaperBroker(), SafetyEngine())
+    st = engine.safety.get_status()
+    out = {
+        "drawdown_pct": st.get("drawdown_pct", 0.0),
+        "halted": st.get("drawdown_halted", False),
+        "limit": st.get("drawdown_halt_limit", 0.0),
+        "reason": st.get("drawdown_halt_reason", ""),
+    }
+    if as_json:
+        print(json.dumps(out, indent=2))
+        return 0
+    flag = "🔴 HALTED" if out["halted"] else "🟢 Active"
+    print(f"Drawdown: {out['drawdown_pct']:.2f}%  (limit {out['limit']:.2f}%)")
+    print(f"State: {flag}")
+    if out["halted"]:
+        print(f"Reason: {out['reason']}")
+    return 0
+
+
+def drawdown_release_cmd(
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON."),
+) -> int:
+    """Release the drawdown halt (operator acknowledgement)."""
+    engine = ExecutionEngine(PaperBroker(), SafetyEngine())
+    engine.safety.release_drawdown_halt()
+    if as_json:
+        print(json.dumps({"status": "drawdown_halt_released"}, indent=2))
+        return 0
+    print("🟢 Drawdown halt RELEASED — trading resumes (halt re-engages if DD recurs)")
+    return 0
+
+
+def drawdown_sync_cmd(
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON."),
+) -> int:
+    """Sync the live MTM equity-curve drawdown into the safety gate."""
+    engine = ExecutionEngine(PaperBroker(), SafetyEngine())
+    status = engine.sync_risk_state()
+    if as_json:
+        print(json.dumps(status, indent=2))
+        return 0
+    print(f"Drawdown synced: {status['drawdown_pct']:.2f}%  "
+          f"halted={status['halted']}")
+    return 0
+
+
+# ── Phase 1: Macro / volatility circuit breaker ─────────────────────────
+def macro_status_cmd(
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON."),
+) -> int:
+    """Show the macro circuit breaker state."""
+    engine = ExecutionEngine(PaperBroker(), SafetyEngine())
+    st = engine.safety.get_status()
+    mb = st.get("macro_breaker")
+    if as_json:
+        print(json.dumps(mb or {"available": False}, indent=2))
+        return 0
+    if not mb:
+        print("⚠️ Macro breaker unavailable")
+        return 0
+    flag = "🔴 TRIPPED" if mb.get("tripped") else "🟢 Active"
+    print(f"Macro breaker: {flag}  (fail-open={mb.get('fail_open')})")
+    if mb.get("reason"):
+        print(f"Reason: {mb['reason']}")
+    last = mb.get("last_snapshot")
+    if last:
+        print(f"Last index change: {last.get('index_change_pct')}  "
+              f"advancers={last.get('advancers')} decliners={last.get('decliners')}")
+    return 0
+
+
+def macro_feed_cmd(
+    index_change_pct: Optional[float] = typer.Option(
+        None, "--index-change", "-i", help="NSE index % change today."),
+    advancers: Optional[int] = typer.Option(
+        None, "--advancers", "-a", help="Number of advancing stocks."),
+    decliners: Optional[int] = typer.Option(
+        None, "--decliners", "-d", help="Number of declining stocks."),
+    vol_pct: Optional[float] = typer.Option(
+        None, "--vol", help="Trailing annualised volatility %."),
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON."),
+) -> int:
+    """Feed a macro snapshot into the breaker (manual operator input)."""
+    engine = ExecutionEngine(PaperBroker(), SafetyEngine())
+    snapshot = {
+        "timestamp": __import__("datetime").datetime.now().isoformat(),
+        "index_change_pct": index_change_pct,
+        "advancers": advancers,
+        "decliners": decliners,
+        "volatility_pct": vol_pct,
+        "source": "manual-cli",
+    }
+    res = engine.safety.feed_macro(snapshot)
+    if as_json:
+        print(json.dumps(res, indent=2))
+        return 0
+    flag = "🔴 TRIPPED" if res["tripped"] else "🟢 OK"
+    print(f"Macro feed → {flag}")
+    if res.get("breach"):
+        print(f"Breach: {res['breach']}")
+    return 0
+
+
+def macro_release_cmd(
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON."),
+) -> int:
+    """Release (reset) the macro circuit breaker."""
+    engine = ExecutionEngine(PaperBroker(), SafetyEngine())
+    engine.safety.release_macro()
+    if as_json:
+        print(json.dumps({"status": "macro_breaker_released"}, indent=2))
+        return 0
+    print("🟢 Macro circuit breaker RELEASED")
+    return 0
+
+
+def macro_snapshot_cmd(
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON."),
+) -> int:
+    """Generate a macro snapshot from live watchlist prices + feed the breaker.
+
+    Derives breadth (advancers/decliners), an equal-weight composite index
+    change, and dispersion from the NSE watchlist, then feeds the breaker so
+    the trade gate halts on a real market-regime signal. Safe to run on a
+    cron (fail-open: a price-fetch failure never trips the breaker).
+    """
+    engine = ExecutionEngine(PaperBroker(), SafetyEngine())
+    result = engine.safety.refresh_macro()
+    if as_json:
+        print(json.dumps(result, indent=2))
+        return 0
+    snap = result.get("snapshot", {})
+    breaker = result.get("breaker", {})
+    flag = "🔴 TRIPPED" if breaker.get("tripped") else "🟢 OK"
+    print(f"Macro snapshot → {flag}")
+    print(f"  proxy index change: {snap.get('index_change_pct')}%  "
+          f"breadth: {result.get('breadth_pct')}%  "
+          f"advancers={snap.get('advancers')} decliners={snap.get('decliners')}")
+    if not result.get("representative"):
+        print(f"  ⚠️  sample too sparse (n={result.get('sample_size')}) — "
+              f"thresholds NOT evaluated (fail-open)")
+    if breaker.get("breach"):
+        print(f"  Breach: {breaker['breach']}")
     return 0
 
 
