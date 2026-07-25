@@ -519,6 +519,31 @@ def run_auto_trade(dry_run: bool = False) -> AutoTraderReport:
     cash = state.get("cash", 0.0)
     current_positions = state.get("positions", [])
 
+    # 1b. Engine agreement gate (defense-in-depth).
+    # Verify the live rebalance engine (target_allocation) and the Decision
+    # Engine (services.decision) agree on per-stock equity targets. In
+    # nse_only mode they share a single source of truth, so divergence
+    # beyond tolerance indicates a real regression. FAIL-OPEN: any error in
+    # the verification itself must never block trading — we treat it as
+    # agreed and move on.
+    try:
+        from trading.target_allocation import verify_target_agreement
+        agree = verify_target_agreement(nse_only=True)
+        if not agree.get("agreed", True):
+            report.add_skip(
+                "ENGINE-AGREEMENT",
+                f"target_allocation vs decision diverge "
+                f"(max {agree.get('max_abs_diff', 0):.1f}% > "
+                f"tol {agree.get('tolerance', 0):.1f}%) — holding fire until "
+                f"reconciled",
+            )
+            return report
+    except Exception as exc:  # noqa: BLE001
+        report.add_skip(
+            "ENGINE-AGREEMENT",
+            f"verification skipped (non-fatal): {exc}",
+        )
+
     # Drop suspended/halted names from the auto-trade universe. They remain in
     # state.json as a manual hold; the engine simply refuses to BUY/SELL them.
     for p in list(current_positions):

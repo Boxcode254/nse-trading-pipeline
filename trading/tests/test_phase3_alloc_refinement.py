@@ -11,6 +11,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
+import json
+
 from trading.target_allocation import (
     generate_rebalance_plan,
     get_target_allocations,
@@ -115,3 +117,53 @@ def test_verify_agreement_multi_asset_wellformed():
     # multi-asset decision splits into cash/forex/gold/tbills too, so equities
     # bucket < 90% -> normalised diff can exceed tolerance; just assert shape.
     assert isinstance(rep["per_stock"], dict)
+
+
+# ── Task 6: auto_trader engine-agreement guard (fail-open) ──────────────────
+
+def _fake_state(tmp_path, positions):
+    portfolio_dir = tmp_path / "portfolio"
+    portfolio_dir.mkdir(exist_ok=True)
+    state = {"cash": 50_000.0, "initial_capital": 100_000.0, "positions": positions}
+    (portfolio_dir / "state.json").write_text(json.dumps(state))
+    return portfolio_dir
+
+
+def _patch_agreement(monkeypatch, tmp_path, agreed):
+    def _fake_expanduser(p):
+        if p.rstrip("/").endswith(".trading"):
+            return str(tmp_path)
+        return p
+    monkeypatch.setattr("trading.auto_trader.os.path.expanduser", _fake_expanduser)
+    monkeypatch.setattr("trading.auto_trader._price_map",
+                        lambda symbols: {s: 86.0 for s in symbols})
+    monkeypatch.setattr("trading.portfolio.engine._default_portfolio_dir",
+                        lambda: str(tmp_path / "portfolio"))
+    monkeypatch.setattr(
+        "trading.target_allocation.verify_target_agreement",
+        lambda **kwargs: {"agreed": agreed, "max_abs_diff": 9.2 if not agreed else 0.0,
+                          "tolerance": 3.0, "per_stock": {}, "nse_only": True},
+    )
+
+
+def test_auto_trader_holds_fire_on_engine_divergence(monkeypatch, tmp_path):
+    """If the two engines disagree beyond tolerance, the auto-trader must
+    refuse to trade (hold fire) rather than execute a divergent plan."""
+    from trading.auto_trader import run_auto_trade
+    _patch_agreement(monkeypatch, tmp_path, agreed=False)
+    _fake_state(tmp_path, [{"symbol": "KCB", "shares": 100, "avg_cost": 80.0,
+                            "current_value": 8000.0}])
+    report = run_auto_trade(dry_run=True)
+    assert any(s["symbol"] == "ENGINE-AGREEMENT" for s in report.stocks_skipped), (
+        f"expected ENGINE-AGREEMENT skip; skipped={report.stocks_skipped}")
+    assert not report.stocks_bought, f"no trades when engines diverge: {report.stocks_bought}"
+
+
+def test_auto_trader_proceeds_when_agreement_ok(monkeypatch, tmp_path):
+    """When engines agree, an otherwise-valid plan still executes."""
+    from trading.auto_trader import run_auto_trade
+    _patch_agreement(monkeypatch, tmp_path, agreed=True)
+    _fake_state(tmp_path, [{"symbol": "KCB", "shares": 100, "avg_cost": 80.0,
+                            "current_value": 8000.0}])
+    report = run_auto_trade(dry_run=True)
+    assert not any(s["symbol"] == "ENGINE-AGREEMENT" for s in report.stocks_skipped)
