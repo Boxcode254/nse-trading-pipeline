@@ -1,6 +1,92 @@
-"""Execution Engine data models."""
+"""Execution Engine data models.
+
+This module is intentionally **side-effect free** so it can be imported from
+anywhere (CLI, cron, tests) without touching disk.
+
+Phase 0 hardening additions (2026-07-25):
+- ``OrderStatus``: explicit, broker-agnostic order lifecycle state machine.
+- ``client_order_id`` on ``OrderRequest``: caller-supplied idempotency key.
+- Filled fields on ``OrderResult``: ``filled_quantity``, ``filled_price``,
+  ``average_fill_price`` so reconciliation can compare intended vs executed.
+- ``to_dict()`` on every dataclass: the execute CLI already relies on this.
+"""
 from dataclasses import dataclass, field
 from typing import Optional, Any
+from enum import Enum
+
+
+class OrderStatus(str, Enum):
+    """Explicit lifecycle of an order managed by the execution engine.
+
+    Transitions are validated by ``OrderStore.transition``. The set of legal
+    next-states per state is intentionally narrow so a bug (or a broker that
+    returns a weird status) cannot silently move an order into an invalid
+    state.
+
+        PENDING    -> NEW | REJECTED | CANCELLED        (never sent to broker)
+        NEW        -> PARTIALLY_FILLED | FILLED | CANCELLED | REJECTED
+        PARTIALLY_FILLED -> FILLED | CANCELLED | REJECTED
+        FILLED     -> (terminal)
+        REJECTED   -> (terminal)
+        CANCELLED  -> (terminal)
+    """
+
+    PENDING = "PENDING"
+    NEW = "NEW"
+    PARTIALLY_FILLED = "PARTIALLY_FILLED"
+    FILLED = "FILLED"
+    CANCELLED = "CANCELLED"
+    REJECTED = "REJECTED"
+
+    # Terminal states — no further transitions allowed.
+    TERMINAL = frozenset({FILLED, REJECTED, CANCELLED})
+
+    # Pending vs done — used by reconciliation and by ``is_open`` helpers.
+    OPEN = frozenset({PENDING, NEW, PARTIALLY_FILLED})
+
+    @classmethod
+    def is_terminal(cls, status: "OrderStatus") -> bool:
+        return status in cls.TERMINAL
+
+    @classmethod
+    def is_open(cls, status: "OrderStatus") -> bool:
+        return status in cls.OPEN
+
+    @classmethod
+    def legal_next(cls, status: "OrderStatus") -> frozenset["OrderStatus"]:
+        """Return the set of states ``status`` is allowed to transition to."""
+        return _TRANSITIONS.get(status, frozenset())
+
+
+# ── Module-level helpers (accept string OR enum) ──
+# Call sites often hold a raw string from JSON; these coerce safely so we
+# never trip ``is_terminal("FILLED")`` returning False (string != enum member).
+def is_terminal(status) -> bool:
+    s = status if isinstance(status, OrderStatus) else OrderStatus(status)
+    return s in OrderStatus.TERMINAL
+
+
+def is_open(status) -> bool:
+    s = status if isinstance(status, OrderStatus) else OrderStatus(status)
+    return s in OrderStatus.OPEN
+
+
+# Allowed transitions as an adjacency map.
+_TRANSITIONS: dict[OrderStatus, frozenset[OrderStatus]] = {
+    OrderStatus.PENDING: frozenset({
+        OrderStatus.NEW, OrderStatus.REJECTED, OrderStatus.CANCELLED,
+    }),
+    OrderStatus.NEW: frozenset({
+        OrderStatus.PARTIALLY_FILLED, OrderStatus.FILLED,
+        OrderStatus.CANCELLED, OrderStatus.REJECTED,
+    }),
+    OrderStatus.PARTIALLY_FILLED: frozenset({
+        OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.REJECTED,
+    }),
+    OrderStatus.FILLED: frozenset(),
+    OrderStatus.REJECTED: frozenset(),
+    OrderStatus.CANCELLED: frozenset(),
+}
 
 
 @dataclass
@@ -16,6 +102,25 @@ class OrderRequest:
     reason: str = ""
     signal_ref: dict[str, Any] = field(default_factory=dict)
     strategy: str = ""  # which strategy generated this order
+    # Idempotency key supplied by the caller. The execution engine dedups on
+    # this BEFORE touching the broker so a retried submission (e.g. cron
+    # overlap, network retry, double-click) cannot double-fill.
+    client_order_id: Optional[str] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "symbol": self.symbol,
+            "side": self.side,
+            "quantity": self.quantity,
+            "order_type": self.order_type,
+            "price": self.price,
+            "limit_price": self.limit_price,
+            "stop_price": self.stop_price,
+            "reason": self.reason,
+            "signal_ref": self.signal_ref,
+            "strategy": self.strategy,
+            "client_order_id": self.client_order_id,
+        }
 
 
 @dataclass
@@ -34,6 +139,35 @@ class OrderResult:
     timestamp: str = ""  # ISO format
     external_id: str = ""  # broker-specific order ID, empty for paper
     realised_pnl: Optional[float] = None  # populated on SELL
+    # ── Phase 0 reconciliation fields ──
+    # ``quantity`` is the INTENDED quantity (what we asked the broker to fill).
+    # The fields below capture what ACTUALLY filled, so the engine can detect
+    # partial fills / mismatches and alert.
+    filled_quantity: int = 0
+    filled_price: Optional[float] = None  # last fill price
+    average_fill_price: Optional[float] = None  # VWAP of all fills
+    client_order_id: Optional[str] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "success": self.success,
+            "order_id": self.order_id,
+            "symbol": self.symbol,
+            "side": self.side,
+            "quantity": self.quantity,
+            "price": self.price,
+            "total": self.total,
+            "fee": self.fee,
+            "status": self.status,
+            "message": self.message,
+            "timestamp": self.timestamp,
+            "external_id": self.external_id,
+            "realised_pnl": self.realised_pnl,
+            "filled_quantity": self.filled_quantity,
+            "filled_price": self.filled_price,
+            "average_fill_price": self.average_fill_price,
+            "client_order_id": self.client_order_id,
+        }
 
 
 @dataclass
@@ -42,6 +176,13 @@ class SafetyVerdict:
     allowed: bool
     reason: str = ""
     violations: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "allowed": self.allowed,
+            "reason": self.reason,
+            "violations": self.violations,
+        }
 
 
 @dataclass
@@ -52,6 +193,15 @@ class ExecutionReport:
     safety: Optional[SafetyVerdict] = None
     message: str = ""
     timestamp: str = ""  # ISO format
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "success": self.success,
+            "order": self.order.to_dict() if self.order else None,
+            "safety": self.safety.to_dict() if self.safety else None,
+            "message": self.message,
+            "timestamp": self.timestamp,
+        }
 
 
 @dataclass
@@ -66,6 +216,18 @@ class AccountInfo:
     currency: str = "KES"
     broker: str = "paper"
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "cash": self.cash,
+            "equity": self.equity,
+            "buying_power": self.buying_power,
+            "positions_count": self.positions_count,
+            "daily_pnl": self.daily_pnl,
+            "daily_pnl_pct": self.daily_pnl_pct,
+            "currency": self.currency,
+            "broker": self.broker,
+        }
+
 
 @dataclass
 class BrokerPosition:
@@ -76,3 +238,13 @@ class BrokerPosition:
     cost_basis: float
     unrealized_pnl: float
     unrealized_pnl_pct: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "symbol": self.symbol,
+            "quantity": self.quantity,
+            "market_value": self.market_value,
+            "cost_basis": self.cost_basis,
+            "unrealized_pnl": self.unrealized_pnl,
+            "unrealized_pnl_pct": self.unrealized_pnl_pct,
+        }

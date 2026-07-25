@@ -34,6 +34,9 @@ sys.path.insert(0, str(ROOT))
 from trading.portfolio import engine as port_engine
 from trading.execution.safety import SafetyEngine
 from trading.execution.models import OrderRequest, OrderResult, AccountInfo
+from trading.execution.run_lock import RunLock
+from trading.execution.order_store import OrderStore
+from trading.execution.alerting import alert
 from trading import config as _cfg_mod
 
 # ── Config ──────────────────────────────────────────────────────────────────
@@ -44,11 +47,18 @@ try:
 except Exception:
     MAX_SECTOR_EXPOSURE_PCT = 50.0
 
+from trading import replay as _replay
+
 CASH_RESERVE_PCT = 10.0  # keep at least 10% of *portfolio* in cash
 DAILY_DEPLOYMENT_CAP_PCT = 25.0  # max % of total portfolio to deploy per day
 MIN_TRADE_KES = 1_000.0
 STOP_LOSS_PCT = 8.0      # auto-sell if a position drops this % below avg cost
 FEE_HEADROOM = 1.0 + float(getattr(port_engine, "TRANSACTION_FEE_PCT", 0.01))
+
+# NSE names with trading halted (regulatory suspension / mandatory offer /
+# delisting). The engine must never auto-trade these — they cannot be exited
+# and any price is event-driven, not a tradeable signal.
+SUSPENDED_SYMBOLS: frozenset[str] = frozenset({"BAMB"})
 
 # Conviction weights kept for reporting/compat (sizing is plan-delta driven)
 CONVICTION_WEIGHT = {
@@ -133,8 +143,53 @@ def _maybe_snapshot(prices: dict[str, float], portfolio_dir: Path) -> None:
     except Exception:
         pass  # snapshot must never block trading
 
-# ── Reporter ────────────────────────────────────────────────────────────────
 
+# Phase 0 reconciliation — verify an executed trade's fill against intent.
+# Paper fills are exact, but on a real broker a fill can be partial or at a
+# slipped price; this catches it and alerts so a silent short-fill is never
+# missed. Tolerance mirrors the ExecutionEngine (0.5%).
+_RECON_PRICE_TOL_PCT = 0.5
+
+
+def _reconcile_trade(
+    symbol: str, side: str, intended_shares: int, intended_price: float,
+    txn, *, alerts_path: str | None = None,
+) -> list[str]:
+    """Compare the executed transaction to what was intended.
+
+    Returns a list of mismatch descriptions (empty == clean). Alerts on any
+    mismatch with CRITICAL severity (money/order-state risk).
+    """
+    mismatches: list[str] = []
+    filled_shares = getattr(txn, "shares", 0)
+    filled_price = getattr(txn, "price", 0.0)
+
+    if filled_shares < intended_shares:
+        mismatches.append(
+            f"PARTIAL FILL {symbol} {side}: intended {intended_shares}, "
+            f"got {filled_shares} ({intended_shares - filled_shares} short)"
+        )
+    if intended_price and intended_price > 0:
+        slip = abs(filled_price - intended_price) / intended_price * 100
+        if slip > _RECON_PRICE_TOL_PCT:
+            mismatches.append(
+                f"PRICE SLIP {symbol} {side}: intended {intended_price:.4f}, "
+                f"filled {filled_price:.4f} ({slip:+.2f}%)"
+            )
+
+    if mismatches:
+        alert(
+            "Auto-trader reconciliation mismatch: " + "; ".join(mismatches),
+            severity="CRITICAL",
+            context={"symbol": symbol, "side": side,
+                     "intended_shares": intended_shares,
+                     "intended_price": intended_price},
+            alerts_path=alerts_path,
+        )
+    return mismatches
+
+
+# ── Reporter ────────────────────────────────────────────────────────────────
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
 SECTOR_MAP: dict[str, str] = dict(_cfg_mod.SECTOR_MAP)
@@ -264,6 +319,10 @@ class AutoTraderReport:
         self.portfolio_after: dict = {}
         self.timestamp = datetime.now(timezone.utc)
 
+    @property
+    def _prefix(self) -> str:
+        return "[REPLAY] " if _replay.is_replay() else ""
+
     def add_buy(self, symbol: str, shares: int, price: float, value: float,
                 reason: str) -> None:
         self.stocks_bought.append(dict(
@@ -287,7 +346,7 @@ class AutoTraderReport:
         """Build the plain-English report."""
         now_str = self.timestamp.strftime("%A, %d %B %Y at %H:%M")
         buf: list[str] = []
-        buf.append(f"📊 **End-of-Day Trading Report** — {now_str}")
+        buf.append(f"{self._prefix}📊 **End-of-Day Trading Report** — {now_str}")
         buf.append("")
 
         # ── Portfolio summary ──
@@ -398,12 +457,28 @@ def run_auto_trade(dry_run: bool = False) -> AutoTraderReport:
     safety.reset_daily()  # once per day, not per order
 
     # 1. Load portfolio state
-    portfolio_dir = Path(os.path.expanduser("~/.trading/portfolio"))
+    if _replay.is_replay():
+        _replay.ensure_replay_env()
+        portfolio_dir = _replay.sandbox_portfolio_dir()
+        _replay.bootstrap_sandbox(portfolio_dir)
+        report.add_skip("REPLAY", f"Sandbox portfolio dir: {portfolio_dir}")
+    else:
+        portfolio_dir = Path(os.path.expanduser("~/.trading/portfolio"))
     state_path = portfolio_dir / "state.json"
     state = _load_state(portfolio_dir)
     initial_capital = state.get("initial_capital", 100_000.0)
     cash = state.get("cash", 0.0)
     current_positions = state.get("positions", [])
+
+    # Drop suspended/halted names from the auto-trade universe. They remain in
+    # state.json as a manual hold; the engine simply refuses to BUY/SELL them.
+    for p in list(current_positions):
+        if p["symbol"] in SUSPENDED_SYMBOLS:
+            current_positions.remove(p)
+            report.add_skip(
+                p["symbol"],
+                "SUSPENDED on NSE — excluded from auto-trading (manual hold only)",
+            )
 
     # Build current holding dict {symbol: shares}
     holdings: dict[str, int] = {}
@@ -433,6 +508,11 @@ def run_auto_trade(dry_run: bool = False) -> AutoTraderReport:
     try:
         from trading.target_allocation import generate_rebalance_plan
         plan = generate_rebalance_plan(dry_run=True)
+        # Check for plan-level constraint violations before processing trades
+        for v in plan.get("violations", []):
+            sv = v.get("severity", "WARN")
+            sym = v.get("symbol", "PORTFOLIO")
+            report.add_skip(sym, f"[{sv}] {v.get('type', 'CONSTRAINT')}: {v.get('message', '')}")
         for t in plan.get("trades", []):
             delta = _plan_delta(t)
             if delta <= 0:
@@ -789,6 +869,11 @@ def run_auto_trade(dry_run: bool = False) -> AutoTraderReport:
                     fee=txn.fee,
                     realised_pnl=txn.realised_pnl,
                 )
+                # Phase 0 reconciliation: intended vs actual fill.
+                _reconcile_trade(
+                    sym, "SELL", sell_shares, price, txn,
+                    alerts_path=os.path.expanduser("~/.trading/execution/alerts.log"),
+                )
             except Exception as exc:
                 report.add_skip(sym, f"Sell failed: {exc}")
 
@@ -907,6 +992,11 @@ def run_auto_trade(dry_run: bool = False) -> AutoTraderReport:
                     price=price,
                     fee=txn.fee,
                 )
+                # Phase 0 reconciliation: intended vs actual fill.
+                _reconcile_trade(
+                    sym, "BUY", buy_shares, price, txn,
+                    alerts_path=os.path.expanduser("~/.trading/execution/alerts.log"),
+                )
                 available_cash -= buy_value * FEE_HEADROOM
                 cash = _state.cash
                 sector_after_sells[sec] = current_sec_val + buy_value
@@ -984,22 +1074,44 @@ def main() -> int:
         "--dry-run", action="store_true",
         help="Simulate only — don't execute trades.",
     )
+    parser.add_argument(
+        "--replay-date", default=None,
+        help="Replay a historical date using archived data (YYYY-MM-DD).",
+    )
     args = parser.parse_args()
 
+    if args.replay_date:
+        os.environ["REPLAY_DATE"] = args.replay_date
+
     print(f"🚀 Auto-Trader starting at {datetime.now().strftime('%Y-%m-%d %H:%M:%S %Z')}")
-    print(f"   Mode: {'DRY RUN' if args.dry_run else 'LIVE'}")
+    mode = "REPLAY" if args.replay_date else ("DRY RUN" if args.dry_run else "LIVE")
+    print(f"   Mode: {mode}" + (f" ({args.replay_date})" if args.replay_date else ""))
     print(f"   Schedule: 10:30 EAT (EOD-bar rebalance mid-session; gap-filtered)")
     print(f"   Sector cap: {MAX_SECTOR_EXPOSURE_PCT:.0f}%  Fee: {port_engine.TRANSACTION_FEE_PCT*100:.1f}% one-way")
     print()
 
-    report = run_auto_trade(dry_run=args.dry_run)
+    # ── Phase 0 run-lock ──
+    # Prevent a second live run from overlapping a still-executing one (cron
+    # overlap, slow data, hung Mansa call). Dry-run and replay are read-only /
+    # sandbox-isolated, so they don't take the live lock.
+    lock = RunLock(holder="auto-trader")
+    if not args.dry_run and not args.replay_date:
+        if not lock.acquire():
+            print("🔒 Auto-Trader already running (lock held) — refusing to start a "
+                  "second live run to prevent double-fill. Exiting.")
+            return 0
+    try:
+        report = run_auto_trade(dry_run=args.dry_run or bool(args.replay_date))
+    finally:
+        if not args.dry_run and not args.replay_date:
+            lock.release()
     print(report.build())
 
     # Refresh MTM prices in state.json after trades
     if not args.dry_run:
         import subprocess
         subprocess.run(
-            ["python3", str(Path.home() / ".hermes" / "scripts" / "refresh-mtm.py")],
+            ["python3", str(Path.home() / ".trading" / "scripts" / "refresh-mtm.py")],
             capture_output=True, text=True,
         )
 

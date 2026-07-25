@@ -1,16 +1,30 @@
-"""Paper trading broker implementation."""
+"""Paper trading broker implementation.
+
+Wraps the portfolio engine for fills, but now also maintains an in-broker
+order record keyed by a **uuid order_id** and tracks ``client_order_id`` so
+the execution engine's idempotency + reconciliation layers have a real
+``get_order_status`` / ``cancel_order`` to call.
+
+Paper fills are synchronous and always complete at the requested price, so:
+- ``get_order_status`` returns FILLED for any order we recorded.
+- ``cancel_order`` returns False for fills (already executed) — paper trades
+  cannot be cancelled, which is correct: the engine should not *think* it
+  cancelled a fill that already settled.
+"""
 from typing import Optional
 import os
+import uuid
 from pathlib import Path
 
 from ..broker import BrokerBase
-from ..models import OrderRequest, OrderResult, AccountInfo, BrokerPosition
-from ...portfolio.engine import (
-    load_state,
-    buy as pf_buy,
-    sell as pf_sell,
-    Position as PfPosition,
+from ..models import (
+    OrderRequest, OrderResult, AccountInfo, BrokerPosition, OrderStatus,
 )
+
+# In-broker order ledger: order_id -> record. Persisted to disk so a process
+# restart can still answer get_order_status. Lives under the portfolio dir's
+# parent so it is colocated with the paper portfolio.
+_LEDGER_NAME = "paper_orders.json"
 
 
 class PaperBroker(BrokerBase):
@@ -20,14 +34,32 @@ class PaperBroker(BrokerBase):
 
     def __init__(self, portfolio_dir: Optional[str] = None):
         self.portfolio_dir = portfolio_dir or os.path.expanduser("~/.trading/portfolio")
+        self._ledger_path = Path(self.portfolio_dir).parent / _LEDGER_NAME
+
+    # ── Persistence of the paper order ledger ──
+    def _load_ledger(self) -> dict:
+        if self._ledger_path.exists():
+            try:
+                return __import__("json").loads(self._ledger_path.read_text())
+            except Exception:
+                return {}
+        return {}
+
+    def _save_ledger(self, ledger: dict) -> None:
+        try:
+            self._ledger_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._ledger_path.with_suffix(".tmp")
+            with open(tmp, "w") as f:
+                __import__("json").dump(ledger, f, indent=2)
+            os.replace(tmp, self._ledger_path)
+        except OSError:
+            pass
 
     def connect(self) -> bool:
-        """Paper broker is always connected."""
         self.connected = True
         return True
 
     def disconnect(self) -> bool:
-        """Paper broker is always connected."""
         self.connected = True
         return True
 
@@ -35,6 +67,7 @@ class PaperBroker(BrokerBase):
         return self.connected
 
     def get_account(self) -> AccountInfo:
+        from ...portfolio.engine import load_state
         state = load_state(self.portfolio_dir)
         return AccountInfo(
             cash=state.cash,
@@ -48,6 +81,7 @@ class PaperBroker(BrokerBase):
         )
 
     def get_positions(self) -> list[BrokerPosition]:
+        from ...portfolio.engine import load_state
         state = load_state(self.portfolio_dir)
         return [
             BrokerPosition(
@@ -62,6 +96,13 @@ class PaperBroker(BrokerBase):
         ]
 
     def place_order(self, request: OrderRequest) -> OrderResult:
+        from ...portfolio.engine import (
+            load_state,
+            buy as pf_buy,
+            sell as pf_sell,
+            Position as PfPosition,
+        )
+
         if request.side == "BUY":
             _, txn = pf_buy(
                 symbol=request.symbol,
@@ -83,26 +124,69 @@ class PaperBroker(BrokerBase):
         else:
             raise ValueError(f"Invalid side: {request.side}")
 
-        return OrderResult(
+        order_id = str(uuid.uuid4())
+        result = OrderResult(
             success=True,
-            order_id=str(hash(txn.timestamp)),
+            order_id=order_id,
             symbol=txn.symbol,
             side=txn.action,
             quantity=txn.shares,
             price=txn.price,
             total=txn.total,
             fee=txn.fee,
-            status="filled",
+            status=OrderStatus.FILLED.value,
             message="",
             timestamp=txn.timestamp,
             external_id="",
             realised_pnl=txn.realised_pnl,
+            filled_quantity=txn.shares,
+            filled_price=txn.price,
+            average_fill_price=txn.price,
+            client_order_id=request.client_order_id,
+        )
+        # Record in the paper ledger for get_order_status.
+        ledger = self._load_ledger()
+        ledger[order_id] = {
+            "client_order_id": request.client_order_id,
+            "symbol": txn.symbol,
+            "side": txn.action,
+            "quantity": txn.shares,
+            "price": txn.price,
+            "filled_quantity": txn.shares,
+            "filled_price": txn.price,
+            "average_fill_price": txn.price,
+            "status": OrderStatus.FILLED.value,
+        }
+        self._save_ledger(ledger)
+        return result
+
+    def get_order_status(self, order_id: str) -> Optional[OrderResult]:
+        """Real status lookup for a paper order by broker order_id."""
+        ledger = self._load_ledger()
+        rec = ledger.get(order_id)
+        if rec is None:
+            return None
+        return OrderResult(
+            success=True,
+            order_id=order_id,
+            symbol=rec["symbol"],
+            side=rec["side"],
+            quantity=rec["quantity"],
+            price=rec.get("price", 0.0),
+            total=rec.get("price", 0.0) * rec["quantity"],
+            fee=0.0,
+            status=rec.get("status", OrderStatus.FILLED.value),
+            message="",
+            timestamp="",
+            external_id="",
+            filled_quantity=rec.get("filled_quantity", rec["quantity"]),
+            filled_price=rec.get("filled_price"),
+            average_fill_price=rec.get("average_fill_price"),
+            client_order_id=rec.get("client_order_id"),
         )
 
-    def get_order_status(self, order_id: str) -> OrderResult:
-        raise NotImplementedError("Paper broker does not track order status")
-
     def cancel_order(self, order_id: str) -> bool:
+        # Paper fills are synchronous and already settled — cannot cancel.
         return False
 
     def get_price(self, symbol: str) -> float:
