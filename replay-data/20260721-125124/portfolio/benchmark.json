@@ -1,0 +1,47 @@
+{
+  "assets": [
+    "EUR/USD",
+    "USD/KES",
+    "SCOM",
+    "KCB",
+    "EQTY",
+    "EABL",
+    "ABSA",
+    "SCBK",
+    "COOP",
+    "KPLC",
+    "TOTL",
+    "KNRE",
+    "WTK",
+    "BAMB"
+  ],
+  "init_prices": {
+    "ABSA": 33.35,
+    "BAMB": 54.0,
+    "COOP": 35.25,
+    "EABL": 252.25,
+    "EQTY": 86.5,
+    "KCB": 80.75,
+    "KNRE": 3.54,
+    "KPLC": 19.2,
+    "SCBK": 337.0,
+    "SCOM": 35.5,
+    "TOTL": 44.05,
+    "WTK": 165.5
+  },
+  "initial_capital": 100000.0,
+  "snapshots": [
+    {
+      "timestamp": "2026-07-13T13:52:30+03:00",
+      "value": 100000.0
+    },
+    {
+      "timestamp": "2026-07-20T10:31:44+03:00",
+      "value": 100000.0
+    },
+    {
+      "timestamp": "2026-07-21T10:31:09+03:00",
+      "value": 102033.74
+    }
+  ]
+}

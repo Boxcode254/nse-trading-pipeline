@@ -1,0 +1,21 @@
+{
+  "date": "2026-07-17",
+  "delay_note": "15-min delayed EOD data from public stock pages",
+  "source": "mystocks.co.ke (public \u2014 no login)",
+  "stocks": {
+    "ABSA": 33.35,
+    "BAMB": 54.0,
+    "COOP": 34.75,
+    "EABL": 272.25,
+    "EQTY": 87.0,
+    "KCB": 80.25,
+    "KNRE": 3.51,
+    "KPLC": 18.8,
+    "SCBK": 338.5,
+    "SCOM": 35.4,
+    "TOTL": 43.45,
+    "WTK": 162.0
+  },
+  "success": true,
+  "timestamp": "2026-07-17T10:30:37.230425+03:00"
+}

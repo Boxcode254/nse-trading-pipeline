@@ -486,6 +486,7 @@ def generate_proposal(
     regime: Optional[str] = None,
     regime_meta: Optional[dict[str, Any]] = None,
     tilt: Optional[str] = None,
+    nse_only: bool = False,
 ) -> AllocationProposal:
     """Build a complete :class:`AllocationProposal`.
 
@@ -494,6 +495,10 @@ def generate_proposal(
     * ``rankings``   — None → call :func:`ranking_svc.build`
     * ``regime``     — None → auto-detect from market data
     * ``tilt``       — None → auto-pick from regime + score average
+    * ``nse_only``   — True → source equity targets from the live
+      ``trading.target_allocation`` engine (single source of truth) instead
+      of the generic score-weighted distributor. Used so this Decision
+      Engine agrees structurally with the auto-trader's rebalance plan.
     """
     notes: list[str] = []
 
@@ -531,10 +536,29 @@ def generate_proposal(
 
     # 5. Category targets
     cat_targets = compute_category_targets(tilt, avg_score or 50.0, regime or "Sideways", "High Vol" if "High Vol" in str(regime_meta.get("volatility")) else "Low Vol")
-    equity_budget = cat_targets["equities"]
 
     # 6. Distribute equities
-    stock_alloc = distribute_equities(tilt, equity_ranking, equity_budget)
+    if nse_only:
+        # Single source of truth: reuse the live NSE engine's per-stock
+        # targets so this Decision Engine structurally agrees with the
+        # auto-trader's rebalance plan (which calls
+        # trading.target_allocation.generate_rebalance_plan).
+        from trading import target_allocation as ta
+        ta_targets = ta.get_target_allocations()
+        stock_alloc = [
+            {"symbol": s, "pct": p, "score": 0, "recommendation": "Hold"}
+            for s, p in ta_targets.items()
+        ]
+        # Override category targets to the NSE engine's vocabulary:
+        # 90% equities (+10% cash reserve); forex/gold/tbills deferred.
+        cat_targets = {
+            "equities": ta.TARGET_INVESTED_PCT,
+            "cash": ta.CASH_RESERVE_PCT,
+            "forex": 0.0, "gold": 0.0, "tbills": 0.0,
+        }
+    else:
+        stock_alloc = distribute_equities(tilt, equity_ranking, cat_targets["equities"])
+    equity_budget = cat_targets["equities"]
 
     # 7. Distribute forex equally between the two monitored pairs
     forex_pairs = config.get_forex_symbols()
@@ -890,13 +914,16 @@ def build(
     regime: Optional[str] = None,
     tilt: Optional[str] = None,
     portfolio_aware: bool = True,
+    nse_only: bool = False,
 ) -> AllocationProposal:
     """Top-level entry point for the CLI.
 
     * If ``portfolio_aware`` is True (default) and a paper portfolio
       exists, its holdings are merged into the proposal's
       ``current_pct`` values. Otherwise every line shows 0% current.
-    * All other args are passed through to :func:`generate_proposal`.
+    * ``nse_only`` (default False) sources equity targets from the live
+      ``trading.target_allocation`` engine for structural agreement with
+      the auto-trader. See :func:`generate_proposal`.
     """
     pf: Optional[dict[str, Any]] = None
     if portfolio_aware:
@@ -906,4 +933,5 @@ def build(
             pf = _load_portfolio_state()
     return generate_proposal(
         portfolio=pf, rankings=rankings, regime=regime, tilt=tilt,
+        nse_only=nse_only,
     )

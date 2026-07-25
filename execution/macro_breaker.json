@@ -1,0 +1,61 @@
+{
+  "tripped": false,
+  "tripped_at": 0.0,
+  "reason": "",
+  "snapshots": [
+    {
+      "timestamp": "2026-07-25T21:19:35.511641+00:00",
+      "index_level": null,
+      "index_change_pct": null,
+      "advancers": null,
+      "decliners": null,
+      "volatility_pct": null,
+      "source": "derived"
+    },
+    {
+      "timestamp": "2026-07-25T21:16:10.824690+00:00",
+      "index_level": null,
+      "index_change_pct": -0.2267,
+      "advancers": 0,
+      "decliners": 1,
+      "volatility_pct": 0.7518,
+      "source": "derived"
+    },
+    {
+      "timestamp": "2026-07-25T21:15:40.512648+00:00",
+      "index_level": null,
+      "index_change_pct": -0.2267,
+      "advancers": 0,
+      "decliners": 1,
+      "volatility_pct": 0.7518,
+      "source": "derived"
+    },
+    {
+      "timestamp": "2026-07-25T21:13:42.113828+00:00",
+      "index_level": null,
+      "index_change_pct": -0.2267,
+      "advancers": 0,
+      "decliners": 1,
+      "volatility_pct": 0.7518,
+      "source": "derived"
+    },
+    {
+      "timestamp": "2026-07-25T21:11:40.328115+00:00",
+      "index_level": null,
+      "index_change_pct": -0.2267,
+      "advancers": 0,
+      "decliners": 1,
+      "volatility_pct": 0.7518,
+      "source": "derived"
+    },
+    {
+      "timestamp": "2026-07-25T23:59:47.376563",
+      "index_level": null,
+      "index_change_pct": -5.0,
+      "advancers": null,
+      "decliners": null,
+      "volatility_pct": null,
+      "source": "manual-cli"
+    }
+  ]
+}

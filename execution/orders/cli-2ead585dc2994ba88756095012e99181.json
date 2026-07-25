@@ -1,0 +1,27 @@
+{
+  "client_order_id": "cli-2ead585dc2994ba88756095012e99181",
+  "order_id": "",
+  "symbol": "SCOM",
+  "side": "BUY",
+  "quantity": 100,
+  "price": 10.0,
+  "reason": "",
+  "status": "FILLED",
+  "filled_quantity": 100,
+  "filled_price": 10.0,
+  "average_fill_price": 10.0,
+  "created_at": "2026-07-25T21:09:25.590192+00:00",
+  "updated_at": "2026-07-25T21:09:25.592957+00:00",
+  "history": [
+    {
+      "ts": "2026-07-25T21:09:25.590204+00:00",
+      "status": "NEW",
+      "note": "order created"
+    },
+    {
+      "ts": "2026-07-25T21:09:25.592965+00:00",
+      "status": "FILLED",
+      "note": "fill update"
+    }
+  ]
+}

@@ -580,9 +580,10 @@ def target_command(
     quiet: bool = typer.Option(False, "--quiet", "-q"),
     as_json: bool = typer.Option(False, "--json", help="Emit JSON on stdout."),
     rebalance: bool = typer.Option(False, "--rebalance", help="Show rebalance trade plan."),
+    verify: bool = typer.Option(False, "--verify", help="Verify target_allocation vs decision engine agreement."),
 ) -> None:
     """Show strategic sector-based target allocation vs current portfolio."""
-    raise typer.Exit(target_cmd.run(quiet=quiet, as_json=as_json, show_rebalance=rebalance))
+    raise typer.Exit(target_cmd.run(quiet=quiet, as_json=as_json, show_rebalance=rebalance, verify=verify))
 
 
 @app.command("rebalance")

@@ -1,0 +1,27 @@
+{
+  "client_order_id": "cli-13be558165c04b8cbb67ff1940e42675",
+  "order_id": "",
+  "symbol": "SCOM",
+  "side": "BUY",
+  "quantity": 10000,
+  "price": 60.0,
+  "reason": "BLOCKED: Violations: max_trade_size, max_single_exposure",
+  "status": "REJECTED",
+  "filled_quantity": 0,
+  "filled_price": null,
+  "average_fill_price": null,
+  "created_at": "2026-07-25T21:09:25.598564+00:00",
+  "updated_at": "2026-07-25T21:09:25.598786+00:00",
+  "history": [
+    {
+      "ts": "2026-07-25T21:09:25.598574+00:00",
+      "status": "NEW",
+      "note": "order created"
+    },
+    {
+      "ts": "2026-07-25T21:09:25.598790+00:00",
+      "status": "REJECTED",
+      "note": "safety: Violations: max_trade_size, max_single_exposure"
+    }
+  ]
+}

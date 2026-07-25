@@ -1,0 +1,59 @@
+[
+  {
+    "benchmark_value": 100000.0,
+    "cash": 100000.0,
+    "daily_return_pct": 0.0,
+    "drawdown_pct": 0.0,
+    "holdings_value": 0.0,
+    "prices": {},
+    "timestamp": "2026-07-13T13:52:30+03:00",
+    "total_return_pct": 0.0,
+    "total_value": 100000.0
+  },
+  {
+    "benchmark_value": 100000.0,
+    "cash": 31284.21,
+    "daily_return_pct": 1.2789,
+    "drawdown_pct": 0.0,
+    "holdings_value": 69994.68,
+    "prices": {
+      "ABSA": 33.35,
+      "BAMB": 54.0,
+      "COOP": 35.25,
+      "EABL": 252.25,
+      "EQTY": 86.5,
+      "KCB": 80.75,
+      "KNRE": 3.54,
+      "KPLC": 19.2,
+      "SCBK": 337.0,
+      "SCOM": 35.5,
+      "TOTL": 44.05,
+      "WTK": 165.5
+    },
+    "timestamp": "2026-07-20T10:31:44+03:00",
+    "total_return_pct": 1.2789,
+    "total_value": 101278.89
+  },
+  {
+    "benchmark_value": 102033.74,
+    "cash": 13903.35,
+    "daily_return_pct": 1.2133,
+    "drawdown_pct": 0.0,
+    "holdings_value": 88604.4,
+    "prices": {
+      "ABSA": 33.4,
+      "COOP": 35.5,
+      "EABL": 275.0,
+      "EQTY": 87.25,
+      "KCB": 82.0,
+      "KNRE": 3.6,
+      "KPLC": 19.8,
+      "SCBK": 343.0,
+      "SCOM": 35.65,
+      "TOTL": 44.5
+    },
+    "timestamp": "2026-07-21T10:31:09+03:00",
+    "total_return_pct": 2.5077,
+    "total_value": 102507.75
+  }
+]

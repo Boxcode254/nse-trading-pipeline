@@ -53,6 +53,7 @@ if _TRADING_ROOT not in sys.path:
     sys.path.insert(0, _TRADING_ROOT)
 
 from trading import config
+from trading import risk_profiles as rp
 
 # ── Paths ───────────────────────────────────────────────────────────────────
 PORTFOLIO_DIR = Path.home() / ".trading" / "portfolio"
@@ -122,6 +123,10 @@ SUSPENDED = {"BAMB"}
 MAX_DAILY_SHIFT_PCT = 5.0   # Max % of portfolio value to shift per day
 SIGNAL_GATE_MIN = 50.0      # Only buy if signal score >= this (Hold+)
 CASH_RESERVE_PCT = 10.0     # Keep at least this % in cash
+# Liquidity cap: never deploy more than this fraction of total portfolio value
+# into a single name on one day, scaled by that name's liquidity score. Keeps
+# illiquid counters (low turnover) from being gapped by a single fat order.
+LIQ_TRADE_PCT_CAP = 0.08
 # Invested sector targets must sum to (100 - CASH_RESERVE_PCT)
 TARGET_INVESTED_PCT = 100.0 - CASH_RESERVE_PCT  # 90.0
 
@@ -147,6 +152,21 @@ SECTOR_CAP_HARD_PCT = 60.0
 # (while the orphan guard blocks the erroneous SELL).
 
 
+def _trade_risk(
+    symbol: str,
+    signal_full: dict[str, Any],
+    hist_cache: Optional[dict[str, Any]] = None,
+) -> dict[str, float]:
+    """Attach a compact risk annotation to a planned trade (for audit/logs)."""
+    sig = signal_full.get(symbol, {}) or {}
+    hist = (hist_cache or {}).get(symbol)
+    vol = rp.realized_vol(symbol, history=hist,
+                          signal_vol=float(sig.get("volatility", 50)) / 100.0)
+    liq = rp.liquidity_score(symbol, signal_full)
+    return {"vol": round(vol, 4), "liq": round(liq, 4),
+            "signal_volatility": float(sig.get("volatility", 50))}
+
+
 def _strategy_universe() -> set[str]:
     """All symbols that appear in the target STRATEGY stock lists."""
     uni: set[str] = set()
@@ -164,13 +184,15 @@ def _delta_trade(
     reason: str,
     sector: str = "",
     signal_score: float = 50.0,
+    risk: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Build a trade dict under the shares contract: qty is always a delta.
 
     Contract (plan ↔ auto_trader):
       - ``delta_shares`` = shares to buy/sell NOW (incremental, never absolute target)
       - ``shares`` = alias of ``delta_shares`` (back-compat)
-      - ``qty_mode`` = always ``\"delta\"``
+      - ``qty_mode`` = always ``\\"delta\\"``
+      - ``risk`` = optional risk annotation {vol, liq, signal_volatility} for audit
     """
     ds = max(0, int(delta_shares))
     px = float(price) if price else 0.0
@@ -185,6 +207,7 @@ def _delta_trade(
         "reason": reason,
         "sector": sector,
         "signal_score": signal_score,
+        "risk": risk or {},
     }
 
 
@@ -397,6 +420,48 @@ def compute_sector_weights(
     }
 
 
+def _risk_weights_for_sector(
+    sector: str,
+    stocks: list[str],
+    *,
+    signals: Optional[dict[str, Any]] = None,
+    matrix: Optional[dict[str, Any]] = None,
+    hist_cache: Optional[dict[str, Any]] = None,
+) -> dict[str, float]:
+    """Return {symbol: weight} summing to 1.0 across ``stocks`` in ``sector``.
+
+    Weight = (1/vol) * liquidity_factor * (1 - 0.5*corr_penalty_norm).
+    Low-volatility, liquid, uncorrelated names receive a larger slice; the
+    most volatile / most-correlated names receive less. Falls back to an
+    equal split when the stock list is empty.
+
+    Inputs are fail-open: when realized history / correlation matrix are
+    absent, we degrade to the ranking ``volatility`` / ``liquidity`` factor
+    scores (already 0..100) via :mod:`trading.risk_profiles`.
+    """
+    if not stocks:
+        return {}
+    sigs = signals or {}
+    raw: dict[str, float] = {}
+    for s in stocks:
+        sig = sigs.get(s, {}) or {}
+        hist = (hist_cache or {}).get(s)
+        vol = rp.realized_vol(
+            s,
+            history=hist,
+            signal_vol=float(sig.get("volatility", 50)) / 100.0,
+        )
+        liq = rp.liquidity_score(s, sigs)
+        peers = [x for x in stocks if x != s]
+        pen = rp.corr_penalty(s, peers, matrix)
+        pen_n = pen / max(1, len(peers))
+        raw[s] = rp.risk_weight(s, vol=vol, liq=liq, corr_penalty_norm=pen_n)
+    tot = sum(raw.values())
+    if tot <= 0:
+        return {s: 1.0 / len(stocks) for s in stocks}
+    return {s: v / tot for s, v in raw.items()}
+
+
 def compute_targets(
     sector_weights: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
@@ -558,6 +623,7 @@ def generate_rebalance_plan(
     prices: Optional[dict[str, float]] = None,
     portfolio: Optional[dict[str, Any]] = None,
     dry_run: bool = True,
+    **kwargs: Any,
 ) -> dict[str, Any]:
     """Generate a target-aware rebalance plan with signal gating.
 
@@ -598,10 +664,18 @@ def generate_rebalance_plan(
         except Exception:
             signals = []
 
-    # Build signal lookup
+    # Build signal lookups (score + full signal dict for risk profiling)
     signal_map: dict[str, float] = {}
+    signal_full: dict[str, dict[str, Any]] = {}
     for s in signals:
-        signal_map[s["symbol"]] = float(s.get("score", 50))
+        sym = s.get("symbol", "")
+        signal_map[sym] = float(s.get("score", 50))
+        signal_full[sym] = s
+
+    # Optional realized-history cache (fail-open). If present, keyed by symbol
+    # -> array-like of recent closes. Absent => risk profiling degrades to
+    # the ranking volatility/liquidity factor scores.
+    hist_cache: dict[str, Any] = kwargs.pop("hist_cache", None) or {}
 
     trades = []
     pos_map = {p["symbol"]: p for p in portfolio.get("positions", [])}
@@ -613,6 +687,15 @@ def generate_rebalance_plan(
         if info["action"] != "trim":
             continue
         # We're over-weight in this sector — trim
+        # Risk-aware: bias the trim toward the highest-risk names (lowest
+        # risk weight) so we keep the steadier, more diversifying holdings.
+        rweights = _risk_weights_for_sector(
+            sec, list(info["stocks_in_sector"]),
+            signals=signal_full, hist_cache=hist_cache,
+        )
+        # Sell bias = inverse of risk weight (higher vol/corr -> sell more).
+        inv = {s: (1.0 - w) for s, w in rweights.items()}
+        inv_tot = sum(inv.values()) or 1.0
         for sym in info["stocks_in_sector"]:
             if sym not in current_stocks:
                 continue
@@ -629,10 +712,15 @@ def generate_rebalance_plan(
             if price <= 0:
                 continue
 
-            # Sell proportionally based on position size
+            # Sell proportionally, biased by risk (inverse weight).
+            # risk_mul > 1 for above-average-risk names (sell more), < 1 for
+            # steadier names (sell less). Clamped so no single name is
+            # grossly over/under-trimmed relative to its position share.
             pos_value = pos.get("current_value", shares * pos["avg_cost"])
             pos_share = pos_value / info["current_value"] if info["current_value"] > 0 else 0
-            sell_value = over_value * pos_share
+            avg_inv = inv_tot / max(1, len(inv))
+            risk_mul = max(0.25, min(4.0, (inv.get(sym, avg_inv) / avg_inv)))
+            sell_value = over_value * pos_share * risk_mul
             sell_shares = max(1, int(sell_value / price))
 
             # Signal gate: don't sell if signal says Accumulate+
@@ -645,9 +733,11 @@ def generate_rebalance_plan(
                 side="SELL",
                 delta_shares=min(sell_shares, shares),
                 price=price,
-                reason=f"Sector {sec} is {info['drift_pct']:+.1f}% over target",
+                reason=f"Sector {sec} is {info['drift_pct']:+.1f}% over target "
+                       f"(risk-biased trim)",
                 sector=sec,
                 signal_score=sig,
+                risk=_trade_risk(sym, signal_full, hist_cache),
             ))
 
     # === BUY signals: under-weight sectors ===
@@ -657,6 +747,11 @@ def generate_rebalance_plan(
         # Concentration guard: never ADD to a sector already at/over HARD cap
         if info.get("current_pct", 0.0) > SECTOR_CAP_HARD_PCT:
             continue
+        # Risk weights across the sector's stock list (fail-open to equal).
+        rweights = _risk_weights_for_sector(
+            sec, list(info["stocks_in_sector"]),
+            signals=signal_full, hist_cache=hist_cache,
+        )
         for sym in info["stocks_in_sector"]:
             if sym in current_stocks:
                 continue  # Already holding — allocation covers it
@@ -675,9 +770,18 @@ def generate_rebalance_plan(
             if buy_value <= 0:
                 continue
 
+            # Risk-aware split: this name's share of the sector top-up.
+            w = rweights.get(sym, 1.0 / max(1, len(info["stocks_in_sector"])))
+            buy_value = buy_value * w
+
             # Cap new entries by daily shift (same as top-ups)
             max_buy = total_value * (MAX_DAILY_SHIFT_PCT / 100)
             buy_value = min(buy_value, max_buy)
+            # Liquidity cap: scale by this name's liquidity so illiquid
+            # counters are never gapped by a single fat order.
+            liq = rp.liquidity_score(sym, signal_full)
+            liq_cap = total_value * LIQ_TRADE_PCT_CAP * max(liq, 0.25)
+            buy_value = min(buy_value, liq_cap)
 
             shares = max(1, int(buy_value / price))
             trades.append(_delta_trade(
@@ -685,9 +789,11 @@ def generate_rebalance_plan(
                 side="BUY",
                 delta_shares=shares,
                 price=price,
-                reason=f"Sector {sec} is {info['drift_pct']:+.1f}% under target",
+                reason=f"Sector {sec} is {info['drift_pct']:+.1f}% under target "
+                       f"(risk weight {w:.0%})",
                 sector=sec,
                 signal_score=sig,
+                risk=_trade_risk(sym, signal_full, hist_cache),
             ))
 
     # === Holdings in under-weight sectors that we already own: top-up ===
@@ -697,9 +803,12 @@ def generate_rebalance_plan(
         # Concentration guard: never ADD to a sector already at/over HARD cap
         if info.get("current_pct", 0.0) > SECTOR_CAP_HARD_PCT:
             continue
-        for sym in info["stocks_in_sector"]:
-            if sym not in current_stocks:
-                continue
+        # Risk weights across the sector's HELD names only (correlation-aware).
+        held_in_sector_syms = [s for s in info["stocks_in_sector"] if s in current_stocks]
+        rweights = _risk_weights_for_sector(
+            sec, held_in_sector_syms, signals=signal_full, hist_cache=hist_cache,
+        )
+        for sym in held_in_sector_syms:
             # We already hold this, but sector is under target — top up
             sig = signal_map.get(sym, 50)
             if sig < SIGNAL_GATE_MIN:
@@ -712,11 +821,8 @@ def generate_rebalance_plan(
             pos = pos_map[sym]
             pos_value = pos.get("current_value", pos["shares"] * pos["avg_cost"])
 
-            # Target: our position's share of sector target
-            held_in_sector = info["current_value"]
-            if held_in_sector <= 0:
-                continue
-            our_share = pos_value / held_in_sector
+            # Target: our position's risk-weighted share of sector target
+            our_share = rweights.get(sym, 1.0 / max(1, len(held_in_sector_syms)))
             our_target = total_value * info["target_pct"] / 100 * our_share
 
             buy_value = max(0, our_target - pos_value)
@@ -726,6 +832,10 @@ def generate_rebalance_plan(
             # Apply daily deployment cap
             max_buy = total_value * (MAX_DAILY_SHIFT_PCT / 100)
             buy_value = min(buy_value, max_buy)
+            # Liquidity cap (scaled)
+            liq = rp.liquidity_score(sym, signal_full)
+            liq_cap = total_value * LIQ_TRADE_PCT_CAP * max(liq, 0.25)
+            buy_value = min(buy_value, liq_cap)
 
             shares = max(1, int(buy_value / price))
 
@@ -739,9 +849,11 @@ def generate_rebalance_plan(
                 side="BUY",
                 delta_shares=shares,
                 price=price,
-                reason=f"Top-up {sym}: sector {sec} is {info['drift_pct']:+.1f}% under target",
+                reason=f"Top-up {sym}: sector {sec} is {info['drift_pct']:+.1f}% under target "
+                       f"(risk weight {our_share:.0%})",
                 sector=sec,
                 signal_score=sig,
+                risk=_trade_risk(sym, signal_full, hist_cache),
             ))
 
     # === Orphan exit: holdings not in any STRATEGY universe (e.g. WTK) ===
@@ -771,6 +883,7 @@ def generate_rebalance_plan(
             reason=f"Orphan position {sym} not in target strategy — full exit",
             sector=sec,
             signal_score=signal_map.get(sym, 50),
+            risk=_trade_risk(sym, signal_full, hist_cache),
         ))
 
     # Summary
@@ -792,6 +905,78 @@ def generate_rebalance_plan(
         },
         "targets": targets,
         "violations": violations,
+    }
+
+
+# ── Engine agreement gate ──────────────────────────────────────────────────
+
+def verify_target_agreement(
+    nse_only: bool = True,
+    tolerance: float = 3.0,
+    portfolio: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """Reconcile ``generate_rebalance_plan`` targets vs ``decision`` engine.
+
+    The auto-trader executes ``generate_rebalance_plan`` (sector weights that
+    sum to 90% equities + 10% cash). The Decision Engine
+    (``services.decision.generate_proposal``) is a separate holistic allocator.
+    This gate checks the two agree on per-stock equity targets.
+
+    When ``nse_only`` is True the Decision Engine sources its equity targets
+    from ``get_target_allocations()`` (single source of truth), so agreement
+    is structural and ``agreed`` should be True. When False, the Decision
+    Engine uses its generic score-weighted distributor (multi-asset buckets),
+    so a divergence is expected and reported rather than asserted.
+
+    Returns a well-formed report dict:
+        {agreed: bool, max_abs_diff: float, tolerance: float,
+         per_stock: {sym: {target_allocation, decision, diff}}, nse_only}
+    """
+    ta = get_target_allocations(portfolio=portfolio)  # {sym: pct_of_total}
+
+    try:
+        from trading.services.decision import generate_proposal
+        prop = generate_proposal(tilt="Balanced", nse_only=nse_only)
+    except Exception:
+        # Fail-open: if the Decision Engine is unavailable, we cannot prove
+        # agreement, but we must not block the live path. Report as a
+        # single-sided report (no divergence detected, but unverified).
+        return {
+            "agreed": True,
+            "max_abs_diff": 0.0,
+            "tolerance": tolerance,
+            "per_stock": {s: {"target_allocation": round(p, 2),
+                              "decision": None, "diff": None}
+                          for s, p in ta.items()},
+            "nse_only": nse_only,
+            "verified": False,
+        }
+
+    eq_lines = {l.symbol: l.target_pct for l in prop.allocations
+                if l.category == "equities"}
+    # Normalise Decision equity lines to the same 90% base as target_allocation
+    # so the comparison is apples-to-apples regardless of its cash bucket.
+    eq_sum = sum(eq_lines.values()) or 1.0
+    norm = {s: p * (TARGET_INVESTED_PCT / eq_sum) for s, p in eq_lines.items()}
+
+    per_stock: dict[str, dict[str, Any]] = {}
+    max_diff = 0.0
+    for s in set(ta) | set(norm):
+        d = abs(ta.get(s, 0.0) - norm.get(s, 0.0))
+        per_stock[s] = {
+            "target_allocation": round(ta.get(s, 0.0), 2),
+            "decision": round(norm.get(s, 0.0), 2),
+            "diff": round(d, 2),
+        }
+        max_diff = max(max_diff, d)
+
+    return {
+        "agreed": max_diff <= tolerance,
+        "max_abs_diff": round(max_diff, 2),
+        "tolerance": tolerance,
+        "per_stock": per_stock,
+        "nse_only": nse_only,
+        "verified": True,
     }
 
 

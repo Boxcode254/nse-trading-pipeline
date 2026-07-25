@@ -36,6 +36,7 @@ def run(
     as_json: bool = False,
     show_rebalance: bool = False,
     dry_run: bool = True,
+    verify: bool = False,
 ) -> int:
     """Show target allocation strategy and sector analysis.
 
@@ -44,11 +45,22 @@ def run(
         as_json: Emit JSON document.
         show_rebalance: Show rebalance plan.
         dry_run: Preview only (default True).
+        verify: Run the engine-agreement gate (target_allocation vs decision).
 
     Returns:
         0 = success
     """
     try:
+        from trading.target_allocation import verify_target_agreement
+
+        if verify:
+            rep = verify_target_agreement()
+            if as_json or quiet:
+                print(output.json_dumps(rep))
+            else:
+                _print_verify(rep)
+            return 0
+
         strategy = get_strategy()
         weights = compute_sector_weights()
         targets = compute_targets(weights)
@@ -184,3 +196,26 @@ def _sector_of(symbol: str) -> str:
     """Quick sector lookup."""
     from trading.target_allocation import SECTOR_MAP
     return SECTOR_MAP.get(symbol, "other")
+
+
+def _print_verify(rep: dict[str, Any]) -> None:
+    """Print the engine-agreement gate result."""
+    print()
+    print("  Engine Target-Agreement Gate")
+    print(f"  {'=' * 60}")
+    flag = "✅ AGREE" if rep["agreed"] else "❌ DIVERGE"
+    verified = rep.get("verified", True)
+    mode = "nse_only" if rep.get("nse_only") else "multi-asset"
+    print(f"  Mode:        {mode}")
+    print(f"  Status:      {flag}")
+    print(f"  Max diff:    {rep['max_abs_diff']:.2f}%   (tolerance {rep['tolerance']:.1f}%)")
+    if not verified:
+        print("  ⚠️  Decision Engine unreachable — verification inconclusive (fail-open).")
+    print()
+    print(f"  {'SYMBOL':<7} {'TARGET':>9} {'DECISION':>10} {'DIFF':>8}")
+    print(f"  {'-' * 38}")
+    for sym, row in sorted(rep["per_stock"].items()):
+        dec = "—" if row["decision"] is None else f"{row['decision']:.2f}%"
+        diff = "—" if row["diff"] is None else f"{row['diff']:+.2f}%"
+        print(f"  {sym:<7} {row['target_allocation']:>8.2f}% {dec:>10} {diff:>8}")
+
