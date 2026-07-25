@@ -16,6 +16,12 @@ portfolio/benchmark.json
 portfolio/mtm_state.json
 portfolio/*.json.bak
 portfolio/*.bak
+portfolio/.outcome_reviewer_progress.json
+portfolio/state_changes.log
+portfolio/axys_closes_*.json
+
+# Auto-trader baseline (written at runtime by auto-trader-baseline.py)
+auto-trader-baseline.json
 
 # ── Execution / safety runtime ─────────────────────────────────────────────
 execution/safety_state.json
