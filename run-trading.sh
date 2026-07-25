@@ -6,8 +6,9 @@
 cd ~/.trading || exit 1
 
 # Run morning brief which now integrates learning
-# First, refresh MTM prices in state.json
-python3 ~/.hermes/scripts/refresh-mtm.py
+# Refresh MTM prices in state.json (use the trading venv for a single
+# consistent interpreter across the whole pipeline)
+.venv/bin/python ~/.hermes/scripts/refresh-mtm.py
 
 exec .venv/bin/python -m trading.cli.main morning --telegram --save 2>&1
 
