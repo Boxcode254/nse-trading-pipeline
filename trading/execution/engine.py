@@ -23,6 +23,7 @@ recoverable, reconcilable order book rather than lost state.
 from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any
+import os
 
 from .models import (
     OrderRequest,
@@ -47,6 +48,14 @@ from .alerting import alert
 _RECON_PRICE_TOL_PCT = 0.5
 
 
+# Paths that belong to the LIVE production portfolio. Writing a fill through
+# the engine against any of these without an explicit opt-in is refused — this
+# is the guard that prevents a verification/debug/CLI run from mutating the
+# real ledger (e.g. the 2026-07-26 Sunday dup-1 test fill that hit prod).
+_PRODUCTION_STATE_DIR = os.path.expanduser("~/.trading/portfolio")
+_PRODUCTION_ORDER_DIR = os.path.expanduser("~/.trading/execution/orders")
+
+
 class ExecutionEngine:
     """Orchestrates the full, hardened execution pipeline."""
 
@@ -60,6 +69,7 @@ class ExecutionEngine:
         broker_timeout: float = 10.0,
         max_retries: int = 2,
         alerts_path: Optional[str] = None,
+        production: bool = False,
     ):
         self.broker = broker
         self.safety = safety or SafetyEngine()
@@ -68,7 +78,52 @@ class ExecutionEngine:
         self.broker_timeout = broker_timeout
         self.max_retries = max_retries
         self._alerts_path = alerts_path
+        # When False, the engine refuses to persist a fill against the real
+        # production portfolio / order store. Only the scheduled auto-trader
+        # (which passes production=True) and an explicit --production CLI flag
+        # may write to prod. Everything else (tests, verify-fix runs, ad-hoc
+        # CLI) must use a sandbox path.
+        self.production = production
         self._connected = False
+
+    def _writes_to_production(self) -> bool:
+        """True if this engine's broker + order store point at live prod paths."""
+        broker_dir = os.path.abspath(
+            getattr(self.broker, "portfolio_dir", "") or ""
+        )
+        store_dir = os.path.abspath(str(getattr(self.order_store, "store_dir", "")) or "")
+        return (
+            os.path.abspath(_PRODUCTION_STATE_DIR) in (broker_dir,)
+            or os.path.abspath(_PRODUCTION_ORDER_DIR) in (store_dir,)
+        )
+
+    def _enforce_production_guard(self, ts: str) -> Optional[ExecutionReport]:
+        """Refuse fills that would mutate the live portfolio without opt-in.
+
+        Returns an ExecutionReport (success=False) if blocked, else None.
+        """
+        if self.production:
+            return None
+        if not self._writes_to_production():
+            return None
+        alert(
+            "ExecutionEngine.production guard: refusing to write a fill against "
+            "the LIVE production portfolio without an explicit opt-in "
+            "(production=True). Route verification/debug runs through a sandbox. "
+            "If this is a deliberate manual trade, pass production=True / --production.",
+            severity="CRITICAL",
+            context={"broker_dir": getattr(self.broker, "portfolio_dir", None)},
+            alerts_path=self._alerts_path,
+        )
+        return ExecutionReport(
+            success=False,
+            message=(
+                "BLOCKED by production-write guard: this engine targets the live "
+                "portfolio but was not started with production=True. Re-run with an "
+                "explicit opt-in, or point the broker/order_store at a sandbox."
+            ),
+            timestamp=ts,
+        )
 
     # ── Connection ────────────────────────────────────────────────────
     def connect(self) -> bool:
@@ -99,6 +154,16 @@ class ExecutionEngine:
     ) -> ExecutionReport:
         """Execute an order through the full safety-checked, reconciled pipeline."""
         ts = datetime.now(timezone.utc).isoformat()
+
+        # ── PRODUCTION-WRITE GUARD ──
+        # Refuse to mutate the live portfolio unless this engine was started
+        # with production=True. This is the structural fix for a verify-fix /
+        # ad-hoc CLI call silently writing to prod (e.g. the 2026-07-26 Sunday
+        # dup-1 fill). Idempotency/safety below still apply; this is checked
+        # first so even a "harmless" repeat cannot land on the real ledger.
+        guard_block = self._enforce_production_guard(ts)
+        if guard_block is not None:
+            return guard_block
 
         # Auto-connect if not connected
         if not self._connected:

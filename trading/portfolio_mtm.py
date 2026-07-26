@@ -110,6 +110,15 @@ def update_portfolio() -> dict[str, Any]:
             pnl = round(current_value - cost, 2) if current_value else None
             pnl_pct = round(((live_price - avg_cost) / avg_cost) * 100, 2) if live_price and avg_cost else None
 
+        # Fallback for suspended / no-price names (e.g. BAMB delisting): carry
+        # cost basis as current_value so the position is not silently dropped
+        # from MTM (current_value must stay > 0 to remain reported).
+        if current_value is None and avg_cost:
+            live_price = avg_cost
+            current_value = round(shares * avg_cost, 2)
+            pnl = 0.0
+            pnl_pct = 0.0
+
         enriched_positions.append({
             "symbol": sym,
             "shares": shares,

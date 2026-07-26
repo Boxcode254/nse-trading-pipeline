@@ -76,7 +76,13 @@ class Position:
     total_cost: float  # shares * avg_cost (cached for fast total)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        d = asdict(self)
+        # Persist a non-zero current_value so it's always reported even for
+        # suspended / no-price names. Fall back to cost basis (total_cost)
+        # when no live price is available — the caller (MTM layer) enriches
+        # separately in mtm_state.json with live prices and P&L.
+        d["current_value"] = round(d["total_cost"], 2)
+        return d
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "Position":

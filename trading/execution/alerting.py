@@ -38,7 +38,7 @@ def log_alert(
     *,
     severity: str = "WARN",
     context: Optional[dict] = None,
-    alerts_path: str = DEFAULT_ALERTS_PATH,
+    alerts_path: Optional[str] = DEFAULT_ALERTS_PATH,
 ) -> dict:
     """Append a structured alert to alerts.log. Never raises."""
     record = {
@@ -47,6 +47,8 @@ def log_alert(
         "message": message,
         "context": context or {},
     }
+    # Use the default if alerts_path is None
+    alerts_path = alerts_path or DEFAULT_ALERTS_PATH
     try:
         path = Path(alerts_path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -91,12 +93,14 @@ def alert(
     severity: str = "WARN",
     context: Optional[dict] = None,
     telegram: bool = True,
-    alerts_path: str = DEFAULT_ALERTS_PATH,
+    alerts_path: Optional[str] = DEFAULT_ALERTS_PATH,
 ) -> dict:
     """Log an alert (always) and optionally push to Telegram (best effort)."""
+    # Use the default if alerts_path is None
+    alerts_path = alerts_path or DEFAULT_ALERTS_PATH
     record = log_alert(message, severity=severity, context=context, alerts_path=alerts_path)
     if telegram and severity in ("WARN", "CRITICAL"):
         # Keep Telegram text short and actionable.
         prefix = "🔴" if severity == "CRITICAL" else "⚠️"
-        send_telegram(f"{prefix} [{severity}] {message}", alerts_path=alerts_path)
+        send_telegram(f"{prefix} [{severity}] {message}")
     return record

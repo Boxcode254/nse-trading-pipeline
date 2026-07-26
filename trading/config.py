@@ -11,7 +11,7 @@ from typing import Any
 # Pairs to monitor. Two forex + twelve NSE-listed Kenyan equities.
 # Format is "BASE/QUOTE" for forex (e.g. "EUR/USD") and a plain ticker
 # symbol for stocks (e.g. "SCOM"). The fetcher routes by asset class
-# via get_asset_class() (anything containing "/" is forex; everything
+# via get_asset_class(pair) (anything containing "/" is forex; everything
 # else is stocks for now).
 PAIRS: list[str] = [
     "EUR/USD",
@@ -106,7 +106,6 @@ YFINANCE_TICKERS: dict[str, str] = {
     "BAMB": "NSE:BAMB",  # Bamburi Cement
 }
 
-
 # ── NSE Data Sources ─────────────────────────────────────────────────
 # Multiple data sources are wired. The active one is set below.
 #
@@ -169,6 +168,8 @@ SECTOR_MAP: dict[str, str] = {
     "WTK": "services",  # held orphan — not in STRATEGY targets
 }
 
+# Suspended/halted symbols (e.g., BAMB). The auto-trader skips these.
+SUSPENDED_SYMBOLS: list[str] = ["BAMB"]
 
 def get_sector(symbol: str) -> str:
     """Return canonical sector for a symbol (default ``other``)."""
@@ -179,7 +180,6 @@ def get_sector(symbol: str) -> str:
 # MYSTOCKS_BASE_URL: str = "https://api.mystocks.co.ke/v1"
 
 # ❌ RapidAPI — considered but never built. Removed.
-
 
 # ── Market Ranking Engine ────────────────────────────────────────────
 # Weights for the 8 scoring factors used by ranking/scorer.py. The
@@ -246,8 +246,35 @@ EXECUTION_CONFIG: dict[str, Any] = {
         "vol_spike_multiple": 3.0,   # annualised vol ceiling (x100%) that halts
         "cooldown_seconds": 86_400,  # 24h before an auto-reconsideration
     },
+    # Sector exposure cap (percent of portfolio) — used by auto_trader to force sells
+    "max_sector_exposure_pct": 25.0,
+    # Cash reserve: fraction of portfolio to keep uninvested (vs opportunities)
+    "cash_reserve_pct": 20.0,
+    # Daily deployment cap: max percent of portfolio to deploy in a single day
+    "daily_deployment_cap_pct": 50.0,
+    # Minimum trade size in KES to avoid dust
+    "min_trade_kes": 1000.0,
+    # Fee headroom: multiplicative factor to estimate fees (1.001 = 0.1% fee)
+    "fee_headroom": 1.001,
 }
 
+# Backward-compatible constants (used by auto_trader.py)
+MAX_SECTOR_EXPOSURE_PCT: float = EXECUTION_CONFIG["max_sector_exposure_pct"]
+MAX_TRADE_SIZE_KES: float = EXECUTION_CONFIG["max_trade_size_kes"]
+MAX_DAILY_LOSS_KES: float = EXECUTION_CONFIG["max_daily_loss_kes"]
+MAX_DAILY_LOSS_PCT: float = EXECUTION_CONFIG["max_daily_loss_pct"]
+MAX_SINGLE_EXPOSURE_PCT: float = EXECUTION_CONFIG["max_single_exposure_pct"]
+MAX_POSITION_COUNT: int = EXECUTION_CONFIG["max_position_count"]
+EXECUTION_ENABLED: bool = EXECUTION_CONFIG["enabled"]
+DEFAULT_BROKER: str = EXECUTION_CONFIG["default_broker"]
+STATE_DIR: str = EXECUTION_CONFIG["state_dir"]
+MAX_DRAWDOWN_HALT_PCT: float = EXECUTION_CONFIG["max_drawdown_halt_pct"]
+STOP_LOSS_PCT: float = EXECUTION_CONFIG["stop_loss_pct"]
+MACRO_FAIL_OPEN: bool = EXECUTION_CONFIG["macro_fail_open"]
+CASH_RESERVE_PCT: float = EXECUTION_CONFIG["cash_reserve_pct"]
+DAILY_DEPLOYMENT_CAP_PCT: float = EXECUTION_CONFIG["daily_deployment_cap_pct"]
+MIN_TRADE_KES: float = EXECUTION_CONFIG["min_trade_kes"]
+FEE_HEADROOM: float = EXECUTION_CONFIG["fee_headroom"]
 
 def get_asset_class(pair: str) -> str:
     """Derive the asset class from a pair name.
@@ -259,7 +286,6 @@ def get_asset_class(pair: str) -> str:
     if "/" in pair:
         return "forex"
     return "stocks"
-
 
 # ── Asset classification (Decision Engine) ─────────────────────────
 # Each monitored pair is mapped to a category (equities / forex / cash /
@@ -301,13 +327,12 @@ ASSET_DISPLAY_ORDER: list[str] = [
     "__gold__", "__tbills__", "__cash__",
 ]
 
-
 def get_asset_category(symbol: str) -> dict[str, str]:
     """Return the category/sector/display for a symbol.
 
     Falls back to a generic ``"other"`` record for unknown symbols so
     the decision engine never crashes on a new ticker. Forex pairs
-    (anything containing ``/``) are auto-categorised when not present
+    (anything containing "/") are auto-categorised when not present
     in the explicit table.
     """
     if symbol in ASSET_CATEGORIES:
@@ -316,18 +341,15 @@ def get_asset_category(symbol: str) -> dict[str, str]:
         return {"category": "forex", "sector": "other", "display": symbol}
     return {"category": "equities", "sector": "other", "display": symbol}
 
-
 def get_equity_symbols() -> list[str]:
     """Return the configured equity symbols (NSE tickers) only."""
     return [s for s, meta in ASSET_CATEGORIES.items()
             if meta["category"] == "equities" and not s.startswith("__")]
 
-
 def get_forex_symbols() -> list[str]:
     """Return the configured forex pairs only."""
     return [s for s, meta in ASSET_CATEGORIES.items()
             if meta["category"] == "forex" and not s.startswith("__")]
-
 
 def ensure_dirs() -> None:
     """Create the on-disk layout the package expects. Idempotent."""

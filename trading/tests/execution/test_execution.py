@@ -11,6 +11,7 @@ from trading.execution import (
     OrderRequest,
     OrderResult,
     AccountInfo,
+    OrderStore,
 )
 
 
@@ -41,7 +42,13 @@ class TestExecutionEngine(TestCase):
                 "emergency_stop_path": os.path.join(safety_dir, "EMERGENCY_STOP"),
             }
         )
-        self.engine = ExecutionEngine(self.broker, self.safety)
+        # Scope the order store to temp dir so the production-write guard
+        # does not block test execution against the live order store.
+        order_store_dir = os.path.join(self.temp_dir, "orders")
+        order_store = OrderStore(store_dir=order_store_dir)
+        self.engine = ExecutionEngine(
+            self.broker, self.safety, order_store=order_store
+        )
 
     def test_safety_engine_init(self):
         """Config defaults are correct."""
