@@ -37,6 +37,8 @@ from trading.execution.models import AccountInfo
 from trading.execution.brokers import PaperBroker
 from trading.execution.safety import SafetyEngine
 from trading.execution.run_lock import RunLock
+from trading.execution.order_store import OrderStore
+from trading.execution.retry import call_with_timeout
 from trading.portfolio import engine as port_engine
 from trading import replay as replay_module
 
@@ -451,6 +453,20 @@ def run_auto_trade(dry_run: bool = False) -> AutoTraderReport:
 
     report = AutoTraderReport()
 
+    # ── Non-trading-day guard (defense-in-depth) ─────────────────────
+    # The live cron fires Mon–Fri only, but an ad-hoc/manual invocation or a
+    # mis-set schedule must never mutate the paper ledger on a closed market.
+    # NSE trades Mon–Fri; skip Sat (5) / Sun (6). Mirrors gap_scan.py's
+    # weekday() convention so the whole pipeline treats weekends identically.
+    _now = datetime.now(timezone.utc)
+    if _now.weekday() >= 5:
+        report.add_skip(
+            "MARKET CLOSED",
+            f"NSE is closed on {_now.strftime('%A %d %b %Y')} — the auto-trader "
+            f"does not execute on non-trading days. No orders were placed.",
+        )
+        return report
+
     # Safety layer — one instance for the whole run (EXECUTION_CONFIG)
     safety = _make_safety()
     safety.reset_daily()  # once per day, not per order
@@ -502,8 +518,20 @@ def run_auto_trade(dry_run: bool = False) -> AutoTraderReport:
     try:
         from trading.target_allocation import verify_target_agreement
 
-        agree = verify_target_agreement(nse_only=True)
-        if not agree.get("agreed", True):
+        # Bounded: verify_target_agreement -> generate_proposal fetches regime
+        # + ranking price history (TradingView) with no inherent timeout. Cap
+        # the whole gate so a slow upstream can never stall the run; on timeout
+        # we fail-open (hold fire pending reconciliation) rather than block.
+        completed, agree, err = call_with_timeout(
+            lambda: verify_target_agreement(nse_only=True), 20.0
+        )
+        if not completed:
+            report.add_skip(
+                "ENGINE-AGREEMENT",
+                "verification timed out (slow market data) — holding fire "
+                "until reconciled",
+            )
+        elif agree is not None and not agree.get("agreed", True):
             report.add_skip(
                 "ENGINE-AGREEMENT",
                 f"target_allocation vs decision diverge "
@@ -772,7 +800,7 @@ def run_auto_trade(dry_run: bool = False) -> AutoTraderReport:
     # We'll use a shared ExecutionEngine for live trades (non-dry_run)
     if not dry_run:
         # Create a shared ExecutionEngine for the whole run
-        order_store = OrderStore(state_dir=os.path.join(config.HOME, "execution"))
+        order_store = OrderStore(store_dir=os.path.join(config.HOME, "execution"))
         engine = ExecutionEngine(
             broker=PaperBroker(portfolio_dir=str(portfolio_dir)),
             safety=safety,

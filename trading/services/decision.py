@@ -55,6 +55,16 @@ from typing import Any, Iterable, Optional
 
 from .. import config
 from . import ranking as ranking_svc
+from ..execution.retry import call_with_timeout
+
+# Bounds for the network-heavy inputs to generate_proposal. Both regime
+# detection and ranking fetch price history (TradingView) with no inherent
+# timeout; if the upstream is slow they would stall the whole proposal build
+# (and therefore the auto-trader's engine-agreement gate). Each is wrapped in
+# call_with_timeout so a slow fetch fails fast and falls back to the same
+# safe default the existing except-branch uses.
+_REGIME_TIMEOUT = 8.0
+_RANKING_TIMEOUT = 8.0
 
 
 # ── Constants: tilt rules ─────────────────────────────────────────────
@@ -504,14 +514,28 @@ def generate_proposal(
 
     # 1. Regime
     if regime is None:
-        regime, regime_meta = _detect_regime()
+        completed, result, err = call_with_timeout(_detect_regime, _REGIME_TIMEOUT)
+        if completed and result is not None:
+            regime, regime_meta = result
+        else:
+            # Slow/blocked regime fetch → fail-open to Sideways (same default
+            # the except-branch in _detect_regime itself returns).
+            regime, regime_meta = "Sideways", {
+                "reason": f"regime detection timed out after {_REGIME_TIMEOUT}s"
+            }
     regime_meta = dict(regime_meta or {})
 
     # 2. Rankings
     if rankings is None:
         try:
-            result = ranking_svc.build()
-            rankings = result.get("ranked", [])
+            completed, result, err = call_with_timeout(
+                ranking_svc.build, _RANKING_TIMEOUT
+            )
+            if completed and result is not None:
+                rankings = result.get("ranked", [])
+            else:
+                notes.append(f"ranking fetch timed out after {_RANKING_TIMEOUT}s")
+                rankings = []
         except Exception as exc:  # noqa: BLE001
             notes.append(f"ranking fetch failed: {exc}")
             rankings = []

@@ -23,6 +23,10 @@ from typing import Optional, Dict, Any
 
 from .models import OrderRequest, OrderResult, SafetyVerdict, AccountInfo
 from .macro_breaker import MacroBreaker, DEFAULT_THRESHOLDS as _MACRO_DEFAULTS
+from .retry import call_with_timeout
+
+# Hard cap on the macro price scan so a slow upstream can never stall the run.
+_MACRO_FETCH_TIMEOUT = 15.0
 
 
 class SafetyEngine:
@@ -376,7 +380,17 @@ class SafetyEngine:
         if prices is None:
             try:
                 from trading.nse_price_fetcher import fetch_prices
-                prices = fetch_prices()
+
+                # Bounded scan: even if the per-symbol timeout in fetch_prices
+                # were bypassed, the macro refresh can never stall the run
+                # longer than _MACRO_FETCH_TIMEOUT (fail-open on timeout).
+                completed, result, err = call_with_timeout(
+                    fetch_prices, _MACRO_FETCH_TIMEOUT
+                )
+                prices = result if completed and result is not None else {}
+                if not completed:
+                    # Leave the breaker in its current (fail-open) state.
+                    pass
             except Exception:
                 prices = {}
         return self.macro.build_snapshot_from_prices(prices, min_sample=min_sample)
