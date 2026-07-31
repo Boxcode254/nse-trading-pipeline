@@ -30,6 +30,16 @@ PAIRS: list[str] = [
     "BAMB",
 ]
 
+# ── News/monitoring-only watchlist ─────────────────────────────────
+# Symbols we want tracked in the daily news scan + earnings calendar but
+# that are NOT part of the tradable universe (auto-trader, strategy
+# engine, ranking, allocation). Adding a ticker here will NEVER generate
+# a buy/sell signal. Use this for "watch interesting NSE names" like
+# Centum (CTUM) without risking unintended trades.
+WATCHLIST_EXTRA: list[str] = [
+    "CTUM",  # Centum Investment Company Plc (NSE:CTUM) — investment holding co.
+]
+
 # Indicator parameters
 SMA_FAST: int = 20
 SMA_SLOW: int = 50
@@ -104,6 +114,7 @@ YFINANCE_TICKERS: dict[str, str] = {
     "KNRE": "NSE:KNRE",  # Kenya Reinsurance Corporation
     "WTK": "NSE:WTK",  # WPP ScanGroup
     "BAMB": "NSE:BAMB",  # Bamburi Cement
+    "CTUM": "NSE:CTUM",  # Centum Investment Company (watch-only, see WATCHLIST_EXTRA)
 }
 
 # ── NSE Data Sources ─────────────────────────────────────────────────

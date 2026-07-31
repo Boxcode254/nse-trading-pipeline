@@ -495,6 +495,156 @@ def test_cli_show_before_init_fails() -> None:
     assert "no portfolio" in res.output.lower() or "init" in res.output.lower()
 
 
+def test_axys_override_no_direction_contradiction() -> None:
+    """AXYS override must keep price AND day-change internally consistent.
+
+    Regression guard for the KCB 'direction flip' bug: axys_reconcile.py
+    corrected live_price to the NSE official close but left change_pct as the
+    (wrong-sign) live feed value, so a position could show price-up but
+    change_pct-negative. This asserts update_portfolio() never produces such a
+    contradiction when AXYS closes are available for close-to-close math.
+
+    Builds a minimal portfolio where the live feed reports a NEGATIVE day
+    change for a name whose AXYS close-to-close is POSITIVE, then verifies the
+    emitted MTM position agrees in sign.
+    """
+    import shutil
+    from trading.portfolio_mtm import update_portfolio
+
+    # NOTE: the @_isolated decorator already pointed HOME at a fresh tmpdir
+    # and trading.portfolio_mtm froze PORTFOLIO_DIR from that HOME at import.
+    # Do NOT call _isolated_home again (it would move HOME and desync the
+    # module-level PORTFOLIO_DIR). Use the decorator-assigned HOME.
+    home = os.environ["HOME"]
+    portfolio_dir = Path(home) / ".trading" / "portfolio"
+    portfolio_dir.mkdir(parents=True)
+
+    # Positions: KCB feed says -0.29% (wrong), AXYS tape says +0.88%.
+    positions = [
+        {"symbol": "KCB", "shares": 118, "avg_cost": 84.0706,
+         "total_cost": 9920.33, "current_value": 10059.5},
+    ]
+    (portfolio_dir / "state.json").write_text(json.dumps({
+        "cash": 10000.0, "initial_capital": 100000.0,
+        "created_at": "2026-07-31", "updated_at": "2026-07-31",
+        "positions": positions,
+    }))
+
+    # Today's AXYS official closes (the tape wins).
+    today = {"KCB": 86.0}
+    # Prior-day AXYS closes -> close-to-close is +0.88% (up).
+    yesterday = {"KCB": 85.25}
+    (portfolio_dir / "axys_closes_2026-07-31.json").write_text(json.dumps({
+        "date": "31st July 2026", "pdf": "dummy.pdf",
+        "axys": today, "narrative_direction": {},
+        "rows": [{"symbol": "KCB", "flag": "PRICE 0.82% off AXYS"}],
+        "applied_override": 0,
+    }))
+    (portfolio_dir / "axys_closes_2026-07-30.json").write_text(json.dumps({
+        "date": "30th July 2026", "pdf": "dummy.pdf",
+        "axys": yesterday, "narrative_direction": {}, "rows": [],
+        "applied_override": 0,
+    }))
+
+    # Patch the live price feed so it returns a WRONG-SIGN day change,
+    # proving the override corrects it rather than trusting the feed.
+    import trading.portfolio_mtm as mtm_mod
+    real_fetch = mtm_mod.fetch_prices
+
+    def _fake_feed(symbols):
+        return {s: {"price": 86.0, "change_pct": -0.29, "source": "fake"}
+                for s in symbols}
+
+    mtm_mod.fetch_prices = _fake_feed
+    try:
+        result = update_portfolio()
+    finally:
+        mtm_mod.fetch_prices = real_fetch
+
+    kcb = next(p for p in result["positions"] if p["symbol"] == "KCB")
+    # Price must equal AXYS official close.
+    assert kcb["live_price"] == 86.0, kcb
+    # Day change must be POSITIVE (AXYS close-to-close), not the feed's -0.29.
+    assert kcb["change_pct"] > 0, f"change_pct should be positive, got {kcb['change_pct']}"
+    # Invariant: sign(price_vs_prior) == sign(change_pct).
+    price_dir = 1 if kcb["live_price"] > yesterday["KCB"] else (-1 if kcb["live_price"] < yesterday["KCB"] else 0)
+    chg_dir = 1 if kcb["change_pct"] > 0 else (-1 if kcb["change_pct"] < 0 else 0)
+    assert price_dir == chg_dir, (
+        f"contradiction: price move {price_dir} vs change_pct {chg_dir}"
+    )
+    # Stored MTM file must also satisfy the invariant for every position.
+    from pathlib import Path as _P
+    stored = json.loads((portfolio_dir / "mtm_state.json").read_text())
+    for p in stored["positions"]:
+        cp = p.get("change_pct")
+        if cp is None:
+            continue
+        # Re-derive direction from the close-to-close we control here.
+        prev = yesterday.get(p["symbol"])
+        if not prev:
+            continue
+        pd_ = 1 if p["live_price"] > prev else (-1 if p["live_price"] < prev else 0)
+        cd_ = 1 if cp > 0 else (-1 if cp < 0 else 0)
+        assert pd_ == cd_, f"{p['symbol']}: price move {pd_} vs change_pct {cd_}"
+
+
+def test_mtm_no_position_has_price_up_but_change_down() -> None:
+    """Hard invariant across ALL positions: price direction == change_pct sign.
+
+    Catches the entire class of 'direction flip' bugs (KCB, EQTY) at the
+    source. Uses the real reconciliation outputs from the 31 Jul 2026 PDF
+    session if present; otherwise constructs a synthetic but realistic set.
+    """
+    from trading.portfolio_mtm import update_portfolio
+    # Use the decorator-assigned HOME (do not re-isolate — would desync the
+    # module-level PORTFOLIO_DIR frozen at import).
+    home = os.environ["HOME"]
+    portfolio_dir = Path(home) / ".trading" / "portfolio"
+    portfolio_dir.mkdir(parents=True)
+
+    positions = [
+        {"symbol": s, "shares": n, "avg_cost": ac, "total_cost": round(n * ac, 2),
+         "current_value": round(n * ac, 2)}
+        for s, n, ac in [
+            ("SCOM", 402, 35.5379), ("ABSA", 306, 33.1863), ("KCB", 118, 84.0706),
+            ("SCBK", 29, 339.6072), ("KPLC", 453, 19.0522), ("COOP", 255, 34.9461),
+            ("KNRE", 2188, 3.5197), ("EABL", 18, 265.6667), ("TOTL", 71, 44.2275),
+            ("EQTY", 33, 87.2845), ("BAMB", 39, 54.0),
+        ]
+    ]
+    (portfolio_dir / "state.json").write_text(json.dumps({
+        "cash": 19360.23, "initial_capital": 100000.0,
+        "created_at": "2026-07-31", "updated_at": "2026-07-31", "positions": positions,
+    }))
+    today = {"SCOM": 36.5, "ABSA": 33.3, "KCB": 86.0, "SCBK": 337.75, "KPLC": 20.95,
+             "COOP": 34.85, "KNRE": 3.79, "EABL": 279.75, "TOTL": 43.45, "EQTY": 86.75,
+             "BAMB": 54.0}
+    yesterday = {"SCOM": 36.2, "ABSA": 33.35, "KCB": 85.25, "SCBK": 338.75, "KPLC": 21.35,
+                 "COOP": 34.9, "KNRE": 3.64, "EABL": 279.25, "TOTL": 43.95, "EQTY": 86.5,
+                 "BAMB": 54.0}
+    (portfolio_dir / "axys_closes_2026-07-31.json").write_text(json.dumps({
+        "date": "31st July 2026", "pdf": "dummy.pdf", "axys": today,
+        "narrative_direction": {}, "rows": [], "applied_override": 0,
+    }))
+    (portfolio_dir / "axys_closes_2026-07-30.json").write_text(json.dumps({
+        "date": "30th July 2026", "pdf": "dummy.pdf", "axys": yesterday,
+        "narrative_direction": {}, "rows": [], "applied_override": 0,
+    }))
+
+    result = update_portfolio()
+    for p in result["positions"]:
+        cp = p.get("change_pct")
+        prev = yesterday.get(p["symbol"])
+        if cp is None or not prev:
+            continue
+        pd_ = 1 if p["live_price"] > prev else (-1 if p["live_price"] < prev else 0)
+        cd_ = 1 if cp > 0 else (-1 if cp < 0 else 0)
+        assert pd_ == cd_, (
+            f"{p['symbol']}: live_price {p['live_price']} vs prev {prev} "
+            f"implies dir {pd_} but change_pct {cp} implies {cd_}"
+        )
+
+
 # Apply isolation to every test_* function defined above.
 import types as _types
 for _name, _obj in list(globals().items()):

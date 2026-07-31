@@ -285,4 +285,5 @@ _SECTOR_KEYWORDS: dict[str, list[tuple[str, float]]] = {
     "eabl": [("brewer", 0.4), ("beer", 0.35), ("diageo", 0.3), ("consumer", 0.25)],
     "absa": [("banking", 0.3), ("absa", 0.4), ("loan", 0.2)],
     "scbk": [("banking", 0.3), ("standard chartered", 0.4), ("loan", 0.2)],
+    "ctum": [("centum", 0.45), ("investment", 0.25)],
 }

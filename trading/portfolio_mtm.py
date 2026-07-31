@@ -38,30 +38,42 @@ def _round2(val: Optional[float]) -> Optional[float]:
     return round(val, 2) if val is not None else None
 
 
-def _load_axys_overrides() -> tuple[frozenset[str], dict[str, float]]:
-    """Return (price_flagged_symbols, {symbol: axys_close}) from the most
-    recent axys_closes_<date>.json (today, else up to 3 days back).
+def _load_axys_overrides() -> tuple[frozenset[str], dict[str, float], dict[str, float]]:
+    """Return (price_flagged_symbols, {symbol: axys_close_today}, {symbol: axys_close_prev}).
 
-    Used so AXYS-vs-NSE official-close corrections survive the regular MTM
-    refresh, which would otherwise overwrite them with pipeline feed prices.
-    Flips are intentionally excluded (monitor-only). Returns empty if none.
+    Reads the most recent axys_closes_<date>.json (today, else up to 6 days
+    back) for the price-flagged set and today's official closes, plus the
+    next-oldest axys_closes file for prior-day closes — used so the day-change
+    can be recomputed authoritatively from the NSE tape (close-to-close) when
+    an AXYS override is applied. This keeps the position's price AND its
+    direction consistent with the official tape, avoiding false direction-flips.
+
+    Flips are intentionally excluded from `flags` (monitor-only). Returns empty
+    if no axys file is found.
     """
     import datetime as _dt
     try:
-        for back in range(0, 4):
+        files = []
+        for back in range(0, 7):
             d = (_dt.date.today() - _dt.timedelta(days=back)).isoformat()
             path = PORTFOLIO_DIR / f"axys_closes_{d}.json"
             if path.exists():
-                data = json.loads(path.read_text())
-                flags = frozenset(
-                    r["symbol"] for r in data.get("rows", [])
-                    if "PRICE" in (r.get("flag") or "")
-                )
-                close = {k: float(v) for k, v in data.get("axys", {}).items()}
-                return flags, close
+                files.append(path)
+        if not files:
+            return frozenset(), {}, {}
+        today_data = json.loads(files[0].read_text())
+        flags = frozenset(
+            r["symbol"] for r in today_data.get("rows", [])
+            if "PRICE" in (r.get("flag") or "")
+        )
+        close_today = {k: float(v) for k, v in today_data.get("axys", {}).items()}
+        close_prev: dict[str, float] = {}
+        if len(files) > 1:
+            prev_data = json.loads(files[1].read_text())
+            close_prev = {k: float(v) for k, v in prev_data.get("axys", {}).items()}
+        return flags, close_today, close_prev
     except Exception:
-        pass
-    return frozenset(), {}
+        return frozenset(), {}, {}
 
 
 def update_portfolio() -> dict[str, Any]:
@@ -79,7 +91,7 @@ def update_portfolio() -> dict[str, Any]:
     symbols = [p["symbol"] for p in positions]
 
     # AXYS reconciliation overrides (survive refresh) — see _load_axys_overrides
-    _axys_flags, _axys_close = _load_axys_overrides()
+    _axys_flags, _axys_close, _axys_prev = _load_axys_overrides()
 
     # Fetch live prices (cached 5 min internally)
     prices = fetch_prices(symbols)
@@ -103,12 +115,24 @@ def update_portfolio() -> dict[str, Any]:
         pnl = round(current_value - cost, 2) if current_value else None
         pnl_pct = round(((live_price - avg_cost) / avg_cost) * 100, 2) if live_price and avg_cost else None
 
-        # Apply AXYS price override for names flagged vs NSE official close
-        if sym in _axys_flags and sym in _axys_close:
+        # Price authoritative from AXYS NSE official close for every covered
+        # name (not just price-flagged ones). AXYS is the NSE tape; the live
+        # feed routinely drifts 0.8-1.3% from it intraday/after-hours. We keep
+        # the feed price only for names AXYS does not cover at all.
+        if sym in _axys_close and _axys_close[sym]:
             live_price = _axys_close[sym]
-            current_value = round(shares * live_price, 2) if live_price else None
-            pnl = round(current_value - cost, 2) if current_value else None
-            pnl_pct = round(((live_price - avg_cost) / avg_cost) * 100, 2) if live_price and avg_cost else None
+        # Day-change authoritative from AXYS close-to-close whenever we have
+        # both today's and prior day's official closes. The live feed's
+        # change_pct is unreliable (sign errors observed on KCB, EQTY). AXYS
+        # is the NSE official tape, so it wins for both price and direction.
+        if sym in _axys_close and sym in _axys_prev and _axys_prev[sym]:
+            change_pct = round(
+                ((_axys_close[sym] - _axys_prev[sym]) / _axys_prev[sym]) * 100, 2
+            )
+        if live_price is not None:
+            current_value = round(shares * live_price, 2)
+            pnl = round(current_value - cost, 2)
+            pnl_pct = round(((live_price - avg_cost) / avg_cost) * 100, 2) if avg_cost else None
 
         # Fallback for suspended / no-price names (e.g. BAMB delisting): carry
         # cost basis as current_value so the position is not silently dropped

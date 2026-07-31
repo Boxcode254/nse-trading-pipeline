@@ -38,16 +38,18 @@ def _context_store_path() -> Path:
 def _tracked_symbols() -> list[str]:
     """Return the list of symbols to fetch news / earnings for.
 
-    Reads from the project's central ``config.PAIRS`` so we don't
+    Reads from ``config.PAIRS`` (tradable universe) plus
+    ``config.WATCHLIST_EXTRA`` (news-only watches) so we don't
     duplicate the list. Forex pairs are filtered out — earnings
     don't apply to them, and news relevance is low.
     """
     try:
         from ... import config
-        return [p for p in config.PAIRS if "/" not in p]
+        syms = list(config.PAIRS) + list(getattr(config, "WATCHLIST_EXTRA", []))
+        return [s for s in syms if "/" not in s]
     except Exception:  # noqa: BLE001
         # Fallback hard-coded list — same as config.PAIRS, no forex.
-        return ["SCOM", "KCB", "EQTY", "EABL", "ABSA", "SCBK"]
+        return ["SCOM", "KCB", "EQTY", "EABL", "ABSA", "SCBK", "CTUM"]
 
 
 def run(*, store_path: Optional[Path] = None) -> dict:
