@@ -72,6 +72,21 @@ graphify-out/
 *.bak
 *.orig
 
+# ── Runtime / delivered artifacts (NEVER commit) ───────────────────────────
+# Auto-trader execution runtime state + per-command JSON dumps
+execution/
+# Delivered PDFs / incoming drop dir (gateway pushes go here)
+incoming/
+# News + paper-order runtime data (regenerated at runtime)
+news/
+paper_orders.json
+paper_orders.json.*
+# Replay harness output (large, transient)
+replay-data/
+# Stray backup copies of test files
+trading/tests/*.backup
+trading/tests/*.bak2
+
 # Empty/local DBs (incl. filenames with trailing spaces on disk)
 *.db
 *.db 

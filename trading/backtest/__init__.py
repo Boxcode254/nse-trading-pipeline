@@ -1,13 +1,13 @@
-"""Historical backtesting for the trading signal strategy.
+"""NSE Backtester package.
 
-Usage
------
-    python3 -m trading backtest                  # all pairs, 2-year default
-    python3 -m trading backtest --pairs SCOM,KCB  # specific pairs
-    python3 -m trading backtest --years 5         # longer window
-    python3 -m trading backtest --benchmark       # compare vs buy-and-hold
+Re-exports the public entry points used by the trading CLI and sibling
+modules. Keep this list in sync with names imported elsewhere:
+    - trading/__main__.py  -> run_backtest, format_backtest_results
+    - trading/scripts/build_risk_cache.py -> fetch_history
 """
+
 from .engine import run_backtest
 from .report import format_backtest_results
+from .fetch_history import fetch_history
 
-__all__ = ["run_backtest", "format_backtest_results"]
+__all__ = ["run_backtest", "format_backtest_results", "fetch_history"]

@@ -1,7 +1,7 @@
 """``trading gap-scan`` — NSE pre-market gap scanner.
 
 Uses Mansa API to find stocks that gapped significantly from
-yesterday's close. Designed to run at ~09:00 EAT.
+yesterday's close. Designed to run at ~09:00 EAT (first 90 min of trading).
 NOTE: Mansa free-tier prices may lag; absolute prices are from Mansa
 but the % change (gap) is what matters for this scan.
 
@@ -103,7 +103,7 @@ def run(
         all_stocks: Show ALL movers, not just watched symbols.
         quiet: Minimal output.
         as_json: Output JSON.
-        cron: When True, silently skip if outside trading hours (08:30-14:00 EAT).
+        cron: When True, silently skip if outside trading hours (08:30-10:30 EAT).
 
     Returns:
         0 on success, 1 if no data, 2 on error.
@@ -121,7 +121,7 @@ def run(
         # Only run between 08:30 and 14:00 EAT on weekdays
         if now_utc.weekday() >= 5:  # Saturday=5, Sunday=6
             return 0  # silently skip weekends
-        if eat_total_min < 8 * 60 + 30 or eat_total_min > 14 * 60:
+        if eat_total_min < 8 * 60 + 30 or eat_total_min > 10 * 60 + 30:
             return 0  # silently skip outside trading hours
     try:
         raw = _fetch_movers()
