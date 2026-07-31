@@ -60,10 +60,36 @@ _ROW = re.compile(
     r"(?P<chg>(?:▲|▼)\s*\(?[\d.]+%?\)?|-)\s")
 
 
-def extract_text(pdf: str) -> str:
+INCOMING_DIR = "/home/hermes/.trading/incoming"
+
+
+def _resolve_pdf(pdf: str) -> str:
+    """Return a PDF path the *current* user can read.
+
+    If the given path is unreadable by the current user (e.g. it lives
+    under another user's private dir like ~/.hermes, mode 700), fall back
+    to a same-basename copy in INCOMING_DIR (which the trading pipeline
+    controls). If nothing readable is found, returns the original path so
+    the caller can emit a clear permission error instead of a misleading
+    "PDF extracted empty".
+    """
+    if pdf and os.access(pdf, os.R_OK):
+        return pdf
+    cand = os.path.join(INCOMING_DIR, os.path.basename(pdf)) if pdf else ""
+    if cand and os.access(cand, os.R_OK):
+        return cand
+    return pdf
+
+
+def extract_text(pdf: str) -> tuple[str, str]:
+    """Run ``pdftotext -layout``. Returns (stdout, stderr).
+
+    Captures stderr so callers can surface the *real* failure reason
+    (e.g. permission denied) instead of misreporting an empty PDF.
+    """
     r = subprocess.run(["pdftotext", "-layout", pdf, "-"],
                        capture_output=True, text=True)
-    return r.stdout
+    return r.stdout, r.stderr
 
 
 def parse_full_table(text: str) -> dict:
@@ -186,9 +212,20 @@ def main() -> int:
             return 2
         pdf = max(files, key=os.path.getmtime)
 
-    text = extract_text(pdf)
+    os.makedirs(INCOMING_DIR, exist_ok=True)
+    pdf = _resolve_pdf(pdf)
+    text, err = extract_text(pdf)
     if not text.strip():
-        print("PDF extracted empty.")
+        if not os.access(pdf, os.R_OK):
+            who = os.getlogin() if hasattr(os, "getlogin") else "current"
+            print(f"\u274c Cannot read PDF: {pdf}\n"
+                  f"   Permission denied — user '{who}' cannot access it.\n"
+                  f"   Fix: run as the file owner, or place a copy under "
+                  f"{INCOMING_DIR}/.")
+        else:
+            print("PDF extracted empty.")
+            if err.strip():
+                print(f"   pdftotext stderr: {err.strip()}")
         return 2
 
     dm = re.search(r"(\d{1,2}(?:st|nd|rd|th)?\s+\w+\s+20\d{2})", text)
