@@ -208,6 +208,25 @@ def _normalize_report_date(raw: str) -> str | None:
     return None
 
 
+def _is_stale(report_iso: str | None, max_days: int = 3) -> bool:
+    """True if the PDF's report date is too old (or future) to apply to today.
+
+    AXYS posts the Daily Market Watch the MORNING AFTER the session it covers,
+    so a 1-day gap (yesterday's close, received today) is the NORMAL case and
+    must NOT be treated as stale. We block only PDFs older than `max_days`
+    (default 3, which tolerates a Friday -> Monday weekend gap) or dated in the
+    future. Unparseable dates fall back to today (not stale).
+    """
+    if not report_iso:
+        return False
+    try:
+        rep_d = datetime.date.fromisoformat(report_iso)
+    except ValueError:
+        return False
+    delta = (datetime.date.today() - rep_d).days
+    return delta > max_days or delta < 0
+
+
 def main() -> int:
     args = sys.argv[1:]
     apply_mode = "--apply" in args
@@ -248,15 +267,19 @@ def main() -> int:
     report_date = dm.group(1) if dm else datetime.date.today().isoformat()
     report_iso = _normalize_report_date(report_date)
     today_iso = datetime.date.today().isoformat()
-    # Date-safety guard: never apply a stale (off-date) PDF to today's book.
-    # A forwarded PDF from a previous trading day must not overwrite live MTM.
-    stale = bool(report_iso and report_iso != today_iso)
+    # Date-safety guard: AXYS publishes the Daily Market Watch the MORNING AFTER
+    # the session it covers, so a PDF dated "yesterday" (received today) is the
+    # NORMAL case and MUST be allowed. Only genuinely old PDFs (forwarded days
+    # later, e.g. a Friday PDF surfacing the following Wednesday) are refused,
+    # because applying a multi-session-stale close would corrupt today's book.
+    # --force overrides. max_days=3 tolerates a Friday -> Monday weekend gap.
+    stale = _is_stale(report_iso, max_days=3)
     forced = "--force" in args
     if stale and not forced:
-        print(f"\u26d4 STALE PDF GUARD: PDF date '{report_date}' ({report_iso}) "
-              f"!= today ({today_iso}).\n"
+        print(f"\u26d4 STALE PDF GUARD: PDF date '{report_date}' ({report_iso}) is "
+              f"more than 3 days old vs today ({today_iso}).\n"
               f"   Refusing to apply this PDF's prices to today's MTM.\n"
-              f"   Run with --force to override (not recommended for off-date PDFs).")
+              f"   Run with --force to override (not recommended for old PDFs).")
     out_date = report_iso if (stale and not forced) else today_iso
 
     explicit = parse_full_table(text)
