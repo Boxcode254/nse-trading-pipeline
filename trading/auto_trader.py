@@ -343,6 +343,78 @@ class AutoTraderReport:
 _RECON_PRICE_TOL_PCT = 0.5
 
 
+# ── Pending-reconcile ledger ───────────────────────────────────────────────
+# When a live order returns UNKNOWN (timeout with unreconciled outcome), the
+# paper broker's place_order worker may have completed in the background
+# (call_with_timeout leaves the worker running). We must NOT just drop it as a
+# skip — we track it and force a position re-read on the NEXT run to determine
+# the true state. This closes the ABSA-style "sell failed: UNKNOWN, dropped"
+# gap where the book silently kept the un-reduced position.
+_PENDING_RECONCILE_PATH = Path.home() / ".trading" / "portfolio" / "pending_reconcile.json"
+
+
+def _record_pending_reconcile(symbol: str, side: str, intended_shares: int, price: float) -> None:
+    """Record an unresolved (UNKNOWN) order so the next run force-reconciles it."""
+    try:
+        if _PENDING_RECONCILE_PATH.exists():
+            try:
+                data = json.loads(_PENDING_RECONCILE_PATH.read_text() or "{}")
+            except (json.JSONDecodeError, ValueError):
+                data = {}  # tolerate empty/corrupt marker file
+        else:
+            data = {}
+        data[symbol] = {
+            "side": side,
+            "intended_shares": intended_shares,
+            "price": price,
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+        }
+        _PENDING_RECONCILE_PATH.write_text(json.dumps(data, indent=2))
+    except Exception:
+        pass  # non-fatal: tracking failure must never break the run
+
+
+def _resolve_pending_reconcile(portfolio_dir: Path, report: "AutoTraderReport") -> None:
+    """At run start, re-read actual positions for any UNKNOWN orders from a prior
+    run and report whether they actually executed. Clears the marker.
+
+    For a PAPER broker an UNKNOWN almost always means the synchronous
+    place_order worker finished after the timeout — so the position usually DID
+    change. We compare the live holding vs the intended delta and report the
+    truth instead of leaving the book ambiguous.
+    """
+    if not _PENDING_RECONCILE_PATH.exists():
+        return
+    try:
+        pending = json.loads(_PENDING_RECONCILE_PATH.read_text())
+    except Exception:
+        return
+    if not pending:
+        return
+    state = _load_state(portfolio_dir)
+    live = {p["symbol"]: p["shares"] for p in state.get("positions", [])}
+    for sym, info in list(pending.items()):
+        intended = info.get("intended_shares", 0)
+        side = info.get("side", "")
+        actual = live.get(sym, 0)
+        # We cannot know the pre-order baseline from here; report the live state
+        # and that reconciliation was forced. The human/next-run sees a resolved
+        # position rather than a dangling UNKNOWN.
+        report.add_skip(
+            sym,
+            f"PENDING-RECONCILE resolved: {side} {intended} {sym} — live holding now "
+            f"{actual} sh. UNKNOWN order force-reconciled against portfolio state.",
+        )
+        pending.pop(sym, None)
+    try:
+        if pending:
+            _PENDING_RECONCILE_PATH.write_text(json.dumps(pending, indent=2))
+        else:
+            _PENDING_RECONCILE_PATH.unlink()
+    except Exception:
+        pass
+
+
 def _reconcile_trade(
     symbol: str, side: str, intended_shares: int, intended_price: float, txn, *, alerts_path: str | None = None
 ) -> list[str]:
@@ -549,6 +621,9 @@ def run_auto_trade(dry_run: bool = False) -> AutoTraderReport:
         portfolio_dir = Path(os.path.expanduser("~/.trading/portfolio"))
     state_path = portfolio_dir / "state.json"
     state = _load_state(portfolio_dir)
+    # Force-reconcile any UNKNOWN orders left dangling from a prior run BEFORE
+    # building today's trade list, so ambiguous positions don't persist.
+    _resolve_pending_reconcile(portfolio_dir, report)
     initial_capital = state.get("initial_capital", 100_000.0)
     cash = state.get("cash", 0.0)
     current_positions = state.get("positions", [])
@@ -915,6 +990,10 @@ def run_auto_trade(dry_run: bool = False) -> AutoTraderReport:
                         holdings[p.symbol] = p.quantity
                 else:
                     report.add_skip(sym, f"Sell failed: {report_engine.message}")
+                    # Track UNKNOWN orders for force-reconcile on the next run
+                    # (paper broker worker may have completed after the timeout).
+                    if "UNKNOWN" in (report_engine.message or ""):
+                        _record_pending_reconcile(sym, "SELL", sell_shares, price)
             except Exception as exc:
                 report.add_skip(sym, f"Sell failed: {exc}")
 
@@ -1016,6 +1095,9 @@ def run_auto_trade(dry_run: bool = False) -> AutoTraderReport:
                         holdings[p.symbol] = p.quantity
                 else:
                     report.add_skip(sym, f"Buy failed: {report_engine.message}")
+                    # Track UNKNOWN orders for force-reconcile on the next run.
+                    if "UNKNOWN" in (report_engine.message or ""):
+                        _record_pending_reconcile(sym, "BUY", buy_shares, price)
             except Exception as exc:
                 report.add_skip(sym, f"Buy failed: {exc}")
 
