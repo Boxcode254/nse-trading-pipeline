@@ -192,6 +192,22 @@ def reapply_from_json(date_str: str) -> int:
     return apply_override(axys, price_flags)
 
 
+def _normalize_report_date(raw: str) -> str | None:
+    """Convert '31st July 2026' style AXYS date to ISO '2026-07-31'.
+
+    Returns None if it cannot be parsed (caller falls back to today).
+    """
+    if not raw:
+        return None
+    cleaned = re.sub(r"(\d)(st|nd|rd|th)", r"\1", raw.strip())
+    for fmt in ("%d %B %Y", "%d %b %Y"):
+        try:
+            return datetime.datetime.strptime(cleaned, fmt).date().isoformat()
+        except ValueError:
+            continue
+    return None
+
+
 def main() -> int:
     args = sys.argv[1:]
     apply_mode = "--apply" in args
@@ -230,6 +246,18 @@ def main() -> int:
 
     dm = re.search(r"(\d{1,2}(?:st|nd|rd|th)?\s+\w+\s+20\d{2})", text)
     report_date = dm.group(1) if dm else datetime.date.today().isoformat()
+    report_iso = _normalize_report_date(report_date)
+    today_iso = datetime.date.today().isoformat()
+    # Date-safety guard: never apply a stale (off-date) PDF to today's book.
+    # A forwarded PDF from a previous trading day must not overwrite live MTM.
+    stale = bool(report_iso and report_iso != today_iso)
+    forced = "--force" in args
+    if stale and not forced:
+        print(f"\u26d4 STALE PDF GUARD: PDF date '{report_date}' ({report_iso}) "
+              f"!= today ({today_iso}).\n"
+              f"   Refusing to apply this PDF's prices to today's MTM.\n"
+              f"   Run with --force to override (not recommended for off-date PDFs).")
+    out_date = report_iso if (stale and not forced) else today_iso
 
     explicit = parse_full_table(text)
     narrative = {}  # retained for completeness; full table supersedes it
@@ -272,11 +300,15 @@ def main() -> int:
             rows.append(rec)
 
     # Apply corrective override to MTM for price-flagged names (flips monitor-only)
-    applied = apply_override({k: v["close"] for k, v in explicit.items()},
-                             price_flags) if apply_mode else 0
+    # NEVER apply when the PDF is stale and not explicitly forced.
+    if apply_mode and stale and not forced:
+        applied = 0  # stale guard: no MTM write
+    else:
+        applied = apply_override({k: v["close"] for k, v in explicit.items()},
+                                 price_flags) if apply_mode else 0
 
     out_path = os.path.join(PORTFOLIO_DIR,
-                            f"axys_closes_{datetime.date.today().isoformat()}.json")
+                            f"axys_closes_{out_date}.json")
     json.dump({"date": report_date, "pdf": os.path.basename(pdf),
                "axys": {k: v["close"] for k, v in explicit.items()},
                "narrative_direction": narrative, "rows": rows,
@@ -299,7 +331,14 @@ def main() -> int:
     else:
         print("\u2705 All reconciled names tie out (no material divergence).")
     if apply_mode:
-        print(f"\U0001f504 Override applied to MTM: {applied} position(s) corrected to AXYS official close.")
+        if stale and not forced:
+            print(f"\U0001f4be Saved historical reference (NO MTM change): "
+                  f"{os.path.basename(out_path)}")
+        else:
+            print(f"\U0001f504 Override applied to MTM: {applied} position(s) corrected to AXYS official close.")
+    elif stale and not forced:
+        print(f"\U0001f4be Saved historical reference (no --apply, NO MTM change): "
+              f"{os.path.basename(out_path)}")
     return 1 if flags else 0
 
 

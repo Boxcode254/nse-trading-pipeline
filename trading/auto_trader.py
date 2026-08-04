@@ -19,8 +19,10 @@ DATA TIMING (explicit):
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -41,6 +43,12 @@ from trading.execution.order_store import OrderStore
 from trading.execution.retry import call_with_timeout
 from trading.portfolio import engine as port_engine
 from trading import replay as replay_module
+
+# === POLICY TRIPWIRE (do not remove) ===
+# News/headlines (news_store.json, Business Daily feeds, market_intel cache) are
+# CONTEXT/ALERTING ONLY. They must NEVER become an execution input. The auto-trader
+# reads ONLY portfolio state + prices (MTM) + allocation rules. See ../POLICY.md.
+# Wiring sentiment/news scores into rebalance weights is explicitly FORBIDDEN.
 
 
 def _make_safety() -> SafetyEngine:
@@ -63,25 +71,47 @@ def _load_state(portfolio_dir: Path) -> dict[str, Any]:
 
 
 def _mystocks_price(symbol: str) -> float | None:
-    """Try to get today's 15-min delayed price from mystocks cache."""
+    """Try to get today's 15-min delayed price from mystocks cache.
+    
+    Staleness guard: if cache file is > 10 min old, treat as missing
+    and fall through to Mansa live fetch.
+    """
     try:
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        cache_path = config.DECISION_CACHE_DIR / f"live-prices-{today}.json"
-        if cache_path.exists():
-            with open(cache_path) as f:
-                data = json.load(f)
-            price = data.get("stocks", {}).get(symbol)
-            if price and 1 < price < 1000:
-                return float(price)
+        cache_path = Path(config.DECISION_CACHE_DIR) / f"live-prices-{today}.json"
+        if not cache_path.exists():
+            return None
+        # Staleness check: cache mtime > 10 min = stale
+        mtime = os.path.getmtime(cache_path)
+        if time.time() - mtime > 600:  # 10 minutes
+            logging.warning(f"mystocks cache for {symbol} stale (age {int(time.time()-mtime)}s), falling back to Mansa")
+            return None
+        with open(cache_path) as f:
+            data = json.load(f)
+        price = data.get("stocks", {}).get(symbol)
+        if price and 1 < price < 1000:
+            return float(price)
     except Exception:
         pass
     return None
 
 
 def _mansa_price(symbol: str) -> float | None:
-    """Try to get current price from Mansa API (primary source)."""
+    """Try to get current price from Mansa API (primary source).
+    Uses shared cache (5 min TTL during market hours)."""
+    # First check cache
+    try:
+        import sys
+        sys.path.insert(0, str(Path.home() / ".hermes" / "scripts"))
+        from mansa_quote_cache import get as mansa_get
+        cached = mansa_get(symbol)
+        if cached is not None:
+            return cached
+    except Exception:
+        pass
+    
+    # Fall back to live API call
     import urllib.request
-
     key = os.environ.get("MANSA_API_KEY", "")
     if not key:
         return None
@@ -95,7 +125,16 @@ def _mansa_price(symbol: str) -> float | None:
         if data.get("success"):
             price = data["data"].get("price")
             if price and 1 < float(price) < 1000:
-                return float(price)
+                price_float = float(price)
+                # Cache for other callers
+                try:
+                    import sys
+                    sys.path.insert(0, str(Path.home() / ".hermes" / "scripts"))
+                    from mansa_quote_cache import set_one as mansa_set
+                    mansa_set(symbol, price_float)
+                except Exception:
+                    pass
+                return price_float
     except Exception:
         pass
     return None

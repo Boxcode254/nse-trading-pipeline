@@ -55,6 +55,12 @@ if _TRADING_ROOT not in sys.path:
 from trading import config
 from trading import risk_profiles as rp
 
+# === POLICY TRIPWIRE (do not remove) ===
+# This engine may read ONLY portfolio state + prices (MTM) + risk weights.
+# News/headlines (news_store.json, Business Daily feeds, market_intel cache)
+# are CONTEXT/ALERTING ONLY and MUST NOT reach rebalance weights. See POLICY.md.
+# No `sentiment_weight` / `news_score` / `headline_adjust` param may be added here.
+
 # ── Paths ───────────────────────────────────────────────────────────────────
 PORTFOLIO_DIR = Path.home() / ".trading" / "portfolio"
 MTM_PATH = PORTFOLIO_DIR / "mtm_state.json"
