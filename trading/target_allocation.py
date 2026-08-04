@@ -273,31 +273,37 @@ def validate_plan_constraints(
     trim_sectors = {t["sector"] for t in trades if t["side"] == "SELL"}
 
     # ── HIGH side: sector concentration cap ──
+    #     Uses the SAME tiered per-sector caps as the auto-trader (config.sector_cap),
+    #     with momentum uplift, so the rebalancer and execution agree. WARN = review
+    #     flag, HARD = forced trim.
     for sec, info in sectors.items():
         cur = info.get("current_pct", 0.0)
-        if cur > SECTOR_CAP_HARD_PCT:
+        cap = config.sector_cap(sec)
+        hard = cap["hard"]
+        warn = cap["warn"]
+        if cur > hard:
             violations.append({
                 "level": "error", "kind": "HARD_CAP", "sector": sec,
                 "symbol": None, "current_pct": round(cur, 2),
-                "limit_pct": SECTOR_CAP_HARD_PCT,
+                "limit_pct": hard,
                 "detail": f"{sec} at {cur:.1f}% exceeds HARD cap "
-                          f"{SECTOR_CAP_HARD_PCT:.0f}% — trim required",
+                          f"{hard:.0f}% — trim required",
             })
             if sec not in trim_sectors:
                 violations.append({
                     "level": "error", "kind": "HARD_CAP_NO_TRIM",
                     "sector": sec, "symbol": None,
                     "current_pct": round(cur, 2),
-                    "limit_pct": SECTOR_CAP_HARD_PCT,
+                    "limit_pct": hard,
                     "detail": f"{sec} over HARD cap but no trim trade generated",
                 })
-        elif cur > SECTOR_CAP_WARN_PCT:
+        elif cur > warn:
             violations.append({
                 "level": "warn", "kind": "WARN_CAP", "sector": sec,
                 "symbol": None, "current_pct": round(cur, 2),
-                "limit_pct": SECTOR_CAP_WARN_PCT,
+                "limit_pct": warn,
                 "detail": f"{sec} at {cur:.1f}% exceeds WARN cap "
-                          f"{SECTOR_CAP_WARN_PCT:.0f}% — review concentration",
+                          f"{warn:.0f}% — review concentration",
             })
 
     # ── LOW side: held-position floor ──

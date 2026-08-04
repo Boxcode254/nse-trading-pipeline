@@ -324,14 +324,17 @@ class AutoTraderReport:
         over_limit = []
         for sec, val in sector_values.items():
             pct = _pct(val, total_a)
-            if pct > config.MAX_SECTOR_EXPOSURE_PCT:
-                over_limit.append((sec, pct))
+            cap = config.sector_cap(sec)
+            # Warn only when over HARD (momentum-adjusted), so a trending winner
+            # doesn't spam the sector warning at the old 25% line.
+            if pct > cap["hard"]:
+                over_limit.append((sec, pct, cap["hard"]))
 
         if over_limit:
             buf.append("━━━ ⚠️ Sector Warning ━━━")
-            for sec, pct in over_limit:
+            for sec, pct, hard in over_limit:
                 buf.append(
-                    f"  {sec} at {pct:.0f}% exceeds the {config.MAX_SECTOR_EXPOSURE_PCT:.0f}% limit"
+                    f"  {sec} at {pct:.0f}% exceeds the {hard:.0f}% limit"
                 )
             buf.append("  Consider diversifying into other sectors on next trade day.")
             buf.append("")
@@ -788,10 +791,16 @@ def run_auto_trade(dry_run: bool = False) -> AutoTraderReport:
 
     sector_pcts = {sec: _pct(val, total_before) for sec, val in sector_current.items()}
 
-    # 5. Apply sector cap — force sells on over-represented sectors
+    # 5. Apply sector cap — force sells on over-represented sectors.
+    #     Uses tiered per-sector caps (config.sector_cap) with momentum uplift,
+    #     so a winning sector (e.g. banking trending up) is NOT force-trimmed at
+    #     HARD; only fading/over-weight sectors get trimmed. Risk-bounded, not
+    #     winner-punishing.
     for sec, pct in sector_pcts.items():
-        if pct > config.MAX_SECTOR_EXPOSURE_PCT:
-            excess_pct = pct - config.MAX_SECTOR_EXPOSURE_PCT
+        cap = config.sector_cap(sec)
+        hard = cap["hard"]
+        if pct > hard:
+            excess_pct = pct - hard
             excess_val = total_before * (excess_pct / 100)
             # Find holdings in this sector, biggest first
             sector_holdings = sorted(
@@ -814,9 +823,9 @@ def run_auto_trade(dry_run: bool = False) -> AutoTraderReport:
                         symbol=sym,
                         delta_shares=0,  # sized in step 7 via sector_cap path
                         target_pct=_pct(current_val - remaining, total_before),
-                        reason=f"Sector cap: {sec} at {pct:.0f}% exceeds {config.MAX_SECTOR_EXPOSURE_PCT:.0f}% limit",
+                        reason=f"Sector cap: {sec} at {pct:.0f}% exceeds {hard:.0f}% limit",
                         sector_cap=True,
-                        excess_pct=pct - config.MAX_SECTOR_EXPOSURE_PCT,
+                        excess_pct=pct - hard,
                     )
                 )
                 remaining -= current_val
@@ -1034,12 +1043,13 @@ def run_auto_trade(dry_run: bool = False) -> AutoTraderReport:
             continue
         sec = _sector_of(sym)
         current_sec_val = sector_after_sells.get(sec, 0) if 'sector_after_sells' in locals() else 0
-        max_sector_val = total_before * (config.MAX_SECTOR_EXPOSURE_PCT / 100)
+        cap = config.sector_cap(sec)
+        max_sector_val = total_before * (cap["warn"] / 100)
         room_in_sector = max_sector_val - current_sec_val
         if room_in_sector <= config.MIN_TRADE_KES:
             report.add_skip(
                 sym,
-                f"Sector cap: {sec} already at or near {config.MAX_SECTOR_EXPOSURE_PCT:.0f}% limit. "
+                f"Sector cap: {sec} already at or near {cap['warn']:.0f}% limit. "
                 f"Room left: KES {room_in_sector:,.0f}",
             )
             continue

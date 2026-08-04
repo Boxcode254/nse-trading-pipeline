@@ -54,6 +54,8 @@ LOOKBACK_DAYS: int = 200
 # Filesystem layout -- all under ~/.trading/ so the package is fully self-contained
 HOME: str = os.path.expanduser("~/.trading")
 DATA_DIR: str = os.path.join(HOME, "data")
+CACHE_DIR: str = os.path.join(HOME, "cache")
+DECISION_CACHE_DIR: str = os.path.join(HOME, "cache")
 SIGNALS_CSV: str = os.path.join(HOME, "signals.csv")
 BACKTEST_DIR: str = os.path.join(HOME, "backtests")
 
@@ -257,8 +259,36 @@ EXECUTION_CONFIG: dict[str, Any] = {
         "vol_spike_multiple": 3.0,   # annualised vol ceiling (x100%) that halts
         "cooldown_seconds": 86_400,  # 24h before an auto-reconsideration
     },
-    # Sector exposure cap (percent of portfolio) — used by auto_trader to force sells
+    # Sector exposure cap (percent of portfolio) — used by auto_trader to force sells.
+    # REPLACED by per-sector SECTOR_CAPS (below) on 2026-08-04: a single flat 25%
+    # force-sold banking even though the strategy targets ~49% banking, causing
+    # constant trim pressure + stuck UNKNOWN sells. Retained as the DEFAULT_CAP
+    # fallback for sectors not listed in SECTOR_CAPS.
     "max_sector_exposure_pct": 25.0,
+    # Tiered per-sector concentration caps. Each sector gets a WARN (review flag)
+    # and HARD (forced trim) ceiling. Sized to CORRELATED-DOWNSIDE tolerance, NOT
+    # to "is the sector profitable" — winners are allowed to run up to HARD.
+    # Banking is the book's core, most-researched edge (5 NSE names, correlated),
+    # so it gets the highest ceiling; a correlated CBK/NPL shock still trims at 45%.
+    "sector_caps": {
+        "banking":   {"warn": 40.0, "hard": 45.0},
+        "telecom":   {"warn": 25.0, "hard": 30.0},
+        "energy":    {"warn": 25.0, "hard": 30.0},
+        "insurance": {"warn": 20.0, "hard": 25.0},
+        "consumer":  {"warn": 20.0, "hard": 25.0},
+        "other":     {"warn": 15.0, "hard": 20.0},
+    },
+    # Momentum gate: when a sector is over its HARD cap BUT still trending up
+    # (sector avg return over `momentum_lookback_days` >= `momentum_min_pct`),
+    # do NOT force-trim — let the winner run (HARD effectively +10pts). Only trim
+    # when momentum is fading. Reads PRICES only (never news). Keeps risk bounded
+    # while not punishing uptrends. Set momentum_min_pct high (e.g. 99) to disable.
+    "momentum_gate": {
+        "enabled": True,
+        "lookback_days": 20,
+        "momentum_min_pct": 0.0,   # sector avg return >= this (over lookback) = still trending
+        "hard_uplift_pct": 10.0,    # HARD cap raised by this when momentum is up
+    },
     # Cash reserve: fraction of portfolio to keep uninvested (vs opportunities)
     "cash_reserve_pct": 20.0,
     # Daily deployment cap: max percent of portfolio to deploy in a single day
@@ -366,3 +396,71 @@ def ensure_dirs() -> None:
     """Create the on-disk layout the package expects. Idempotent."""
     for path in (HOME, DATA_DIR, BACKTEST_DIR, LOGS_DIR):
         os.makedirs(path, exist_ok=True)
+
+
+# ── Tiered sector-cap resolver ──────────────────────────────────────────────
+# Centralises the per-sector WARN/HARD caps (+ momentum uplift) so auto_trader
+# and target_allocation enforce the SAME numbers. Reads PRICES only (never news)
+# for the momentum gate.
+def sector_cap(sector: str) -> dict:
+    """Return {warn, hard} for a sector, applying the momentum uplift if trending.
+
+    Falls back to DEFAULT_CAP (max_sector_exposure_pct) for unknown sectors.
+    The momentum gate raises HARD by `hard_uplift_pct` when the sector's average
+    return over `lookback_days` is >= `momentum_min_pct` (i.e. still trending up),
+    so winning sectors are NOT force-trimmed at HARD. Reads price history from
+    data/nse_<SYM>.csv; on any failure, no uplift (conservative).
+    """
+    caps = EXECUTION_CONFIG.get("sector_caps", {})
+    default = float(EXECUTION_CONFIG.get("max_sector_exposure_pct", 25.0))
+    base = caps.get(sector, {"warn": default, "hard": default})
+    warn = float(base.get("warn", default))
+    hard = float(base.get("hard", default))
+
+    gate = EXECUTION_CONFIG.get("momentum_gate", {}) or {}
+    if not gate.get("enabled", False):
+        return {"warn": warn, "hard": hard}
+
+    try:
+        lookback = int(gate.get("lookback_days", 20))
+        min_pct = float(gate.get("momentum_min_pct", 0.0))
+        uplift = float(gate.get("hard_uplift_pct", 10.0))
+        # Sector members from SECTOR_MAP
+        members = [s for s, sec in SECTOR_MAP.items() if sec == sector]
+        rets = []
+        for sym in members:
+            csv_path = DATA_DIR / f"nse_{sym}.csv"
+            if not csv_path.exists():
+                continue
+            import csv
+            rows = list(csv.DictReader(open(csv_path)))
+            if len(rows) < 2:
+                continue
+            last = _num(rows[-1])
+            prev = _num(rows[-min(lookback + 1, len(rows))])
+            if last and prev:
+                rets.append((last - prev) / prev * 100)
+        if rets and (sum(rets) / len(rets)) >= min_pct:
+            hard += uplift
+    except Exception:
+        pass  # conservative: no uplift on any error
+    return {"warn": warn, "hard": hard}
+
+
+def _num(row: dict) -> float:
+    """Extract a close-like numeric from a CSV row (handles column variants)."""
+    for key in ("close", "Close", "price", "Price"):
+        v = row.get(key)
+        if v in (None, ""):
+            continue
+        try:
+            return float(str(v).replace(",", ""))
+        except (ValueError, AttributeError):
+            continue
+    vals = list(row.values())
+    if len(vals) > 4:
+        try:
+            return float(str(vals[4]).replace(",", ""))
+        except (ValueError, AttributeError):
+            return 0.0
+    return 0.0
