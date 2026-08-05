@@ -184,6 +184,41 @@ def _price_map(symbols: list[str]) -> dict[str, float]:
     return prices
 
 
+def _detect_locked_symbols() -> dict[str, str]:
+    """Dynamically detect NSE names that are OHLC-locked (open=high=low=close
+    for an extended run) in their cached bar history — the signature of a
+    suspension/halt. Returns {symbol: reason} for every name currently locked.
+
+    This closes the silent-freeze gap: previously the engine only knew about
+    suspension via the STATIC config.SUSPENDED_SYMBOLS list (BAMB only). A
+    name suspended without being pre-listed would be held forever, reported
+    as a healthy holding. Now we detect it from price data instead.
+
+    Fail-open: any error (missing file, bad data) returns {} so a data glitch
+    never blocks trading or produces a false suspension.
+    """
+    try:
+        import pandas as _pd
+        from trading.risk.illiquidity_detector import detect_illiquidity
+        from pathlib import Path as _P
+        data_dir = _P(config.HOME) / "data"
+        out: dict[str, str] = {}
+        # Scan every cached nse_*.csv so we catch names we don't even hold yet
+        # (a locked name should also be excluded from NEW buys).
+        for csv in sorted(data_dir.glob("nse_*.csv")):
+            sym = csv.stem.replace("nse_", "")
+            try:
+                df = _pd.read_csv(csv)
+                v = detect_illiquidity(sym, df)
+                if v.status in ("locked", "suspicious"):
+                    out[sym] = v.note
+            except Exception:
+                continue
+        return out
+    except Exception:
+        return {}
+
+
 def _sector_of(symbol: str) -> str:
     return config.get_sector(symbol)
 
@@ -664,13 +699,18 @@ def run_auto_trade(dry_run: bool = False) -> AutoTraderReport:
 
     # Drop suspended/halted names from the auto-trade universe. They remain in
     # state.json as a manual hold; the engine simply refuses to BUY/SELL them.
+    # Combines the STATIC list (config.SUSPENDED_SYMBOLS, e.g. BAMB) with the
+    # DYNAMIC detector (OHLC-lock scan) so a name suspended without being
+    # pre-listed is caught too — closes the silent-freeze gap.
+    locked_now = _detect_locked_symbols()
     for p in list(current_positions):
-        if p["symbol"] in config.SUSPENDED_SYMBOLS:
+        sym = p["symbol"]
+        if sym in config.SUSPENDED_SYMBOLS or sym in locked_now:
             current_positions.remove(p)
-            report.add_skip(
-                p["symbol"],
-                "SUSPENDED on NSE — excluded from auto-trading (manual hold only)",
+            reason = locked_now.get(sym) or (
+                "SUSPENDED on NSE — excluded from auto-trading (manual hold only)"
             )
+            report.add_skip(sym, f"NON-TRADEABLE: {reason}")
 
     # Build current holding dict {symbol: shares}
     holdings: dict[str, int] = {}
