@@ -234,10 +234,13 @@ def buy_cmd(
         return _err(str(exc), as_json)
 
     if all_in:
-        # Compute max affordable shares
+        # Compute max affordable shares using the realistic cost model
         state = pf.load_state()
-        fee_per_share = max(round(price * pf.TRANSACTION_FEE_PCT, 2), pf.FEE_MIN)
-        per_share = round(price + fee_per_share, 2)
+        from trading import config as _cfg
+        cinfo = _cfg.trade_cost(price, price)  # fee for a single share's value
+        fee_per_share = cinfo["fee"] / 1.0 if price else 0.0  # fee component per share
+        slip_per_share = cinfo["slippage"] / 1.0 if price else 0.0
+        per_share = round(price + fee_per_share + slip_per_share, 2)
         max_shares = int(state.cash // per_share)
         if max_shares < 1:
             return _err(

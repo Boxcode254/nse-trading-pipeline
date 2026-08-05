@@ -295,8 +295,22 @@ EXECUTION_CONFIG: dict[str, Any] = {
     "daily_deployment_cap_pct": 50.0,
     # Minimum trade size in KES to avoid dust
     "min_trade_kes": 1000.0,
-    # Fee headroom: multiplicative factor to estimate fees (1.001 = 0.1% fee)
-    "fee_headroom": 1.001,
+    # ── Realistic NSE cost model (live-honest paper book) ──────────────────────
+    # Per-side costs approximate the all-in NSE round-trip: brokerage (~1.0-1.5%,
+    # discounted for value > KES 50k) + CDSC (0.012%) + statutory levy (0.0008%)
+    # + stamp duty (0.0% on equities, but 0.05% on some) + VAT (16% on brokerage).
+    # We model a SIMPLER, conservative proxy so the paper book doesn't overstate
+    # edge: per-side % fee + a minimum commission floor (real brokers don't charge
+    # fractional cents on small trades) + a slippage estimate (fills aren't at mid).
+    "cost_model": {
+        "per_side_pct": 1.5,        # % of trade value, per side (BUY and SELL each)
+        "min_commission_kes": 60.0, # real brokers floor commission ~KES 50-100
+        "slippage_pct": 0.15,       # est. fill slippage per side (spread/impact)
+        "slippage_model": "pct_of_price",  # applied to execution price, not value
+    },
+    # Fee headroom: multiplicative factor to reserve fee+min-commission when sizing
+    # buys. Must cover per_side_pct + min_commission headroom. 1.02 ≈ 2% buffer.
+    "fee_headroom": 1.02,
 }
 
 # Backward-compatible constants (used by auto_trader.py)
@@ -464,3 +478,36 @@ def _num(row: dict) -> float:
         except (ValueError, AttributeError):
             return 0.0
     return 0.0
+
+
+# ── Realistic trade-cost model (live-honest paper book) ────────────────────────
+# Single source of truth for BUY/SELL costs so the engine and auto-trader report
+# the SAME realistic drag. Returns (fee, slippage, total_cost) for a trade of
+# `value` KES at `price`. Per-side % + minimum commission floor + slippage.
+def trade_cost(value: float, price: float = 0.0) -> dict:
+    """Estimate realistic NSE trade cost for a KES `value` trade.
+
+    Components (per side):
+      - per_side_pct of trade value (brokerage+CDSC+levy+VAT proxy)
+      - min_commission_kes floor (real brokers don't charge fractional cents)
+      - slippage: slippage_pct of price, applied to the fill (not value)
+    Returns {fee, slippage, total} where total = fee + slippage*value proxy.
+    On any error, falls back to a conservative 1.5% flat fee (no floor).
+    """
+    cm = EXECUTION_CONFIG.get("cost_model", {}) or {}
+    try:
+        pct = float(cm.get("per_side_pct", 1.5)) / 100.0
+        floor = float(cm.get("min_commission_kes", 60.0))
+        slip_pct = float(cm.get("slippage_pct", 0.15)) / 100.0
+        fee = max(value * pct, floor)
+        # slippage expressed as KES: slip_pct of price * implied shares (value/price)
+        slip = 0.0
+        if price and price > 0:
+            slip = (value / price) * price * slip_pct  # = value * slip_pct
+        return {
+            "fee": round(fee, 2),
+            "slippage": round(slip, 2),
+            "total": round(fee + slip, 2),
+        }
+    except Exception:
+        return {"fee": round(value * 0.015, 2), "slippage": 0.0, "total": round(value * 0.015, 2)}

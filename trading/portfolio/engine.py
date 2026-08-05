@@ -39,11 +39,9 @@ def _default_portfolio_dir() -> str:
 DEFAULT_PORTFOLIO_DIR: str = _default_portfolio_dir()
 
 DEFAULT_CAPITAL = 100_000.0
-# Paper fee: ~1.0% one-way proxy for NSE all-in costs (brokerage + levy +
-# stamp + CDS). Real round-trip is often ~1.5–2%+ depending on broker.
-# Was 0.1% which systematically overstated paper edge.
-TRANSACTION_FEE_PCT = 0.01
-FEE_MIN = 0.01  # never less than 1 cent
+# Realistic trade cost is now sourced from config.cost_model via config.trade_cost()
+# (per-side % + minimum commission floor + slippage). The old flat
+# TRANSACTION_FEE_PCT/FEE_MIN constants are removed. See trading/config.py.
 
 
 # ── Errors ─────────────────────────────────────────────────────────────────
@@ -405,11 +403,6 @@ def _save_state(state: PortfolioState, dir_path: Optional[str] = None) -> None:
 
 
 # ── Trading primitives ────────────────────────────────────────────────────
-def _fee_for(total: float) -> float:
-    """0.1% of trade value, minimum 1 cent."""
-    return max(round(total * TRANSACTION_FEE_PCT, 2), FEE_MIN)
-
-
 def buy(
     symbol: str,
     shares: int,
@@ -429,8 +422,13 @@ def buy(
 
     state = load_state(dir_path)
     total = round(shares * price, 2)
-    fee = _fee_for(total)
-    cost = round(total + fee, 2)
+    from .. import config as _cfg
+    cost_info = _cfg.trade_cost(total, price)
+    fee = cost_info["fee"]
+    slip = cost_info["slippage"]
+    # Slippage raises the effective buy price (you pay more than mid).
+    effective_price = round(price * (1 + (slip / total if total else 0)), 4) if total else price
+    cost = round(total + fee + slip, 2)
 
     if cost > state.cash + 0.0001:
         raise InsufficientCashError(
@@ -439,14 +437,15 @@ def buy(
 
     new_cash = round(state.cash - cost, 2)
     existing = state.position_for(symbol)
+    effective_total = round(total + slip, 2)  # mid value + slippage paid
     if existing is None:
         state.positions.append(Position(
-            symbol=symbol, shares=shares, avg_cost=price, total_cost=total,
+            symbol=symbol, shares=shares, avg_cost=effective_price, total_cost=effective_total,
         ))
     else:
-        # Weighted-average cost basis
+        # Weighted-average cost basis (use effective cost incl. slippage)
         new_total_shares = existing.shares + shares
-        new_total_cost = round(existing.total_cost + total, 2)
+        new_total_cost = round(existing.total_cost + effective_total, 2)
         new_avg = round(new_total_cost / new_total_shares, 4)
         existing.shares = new_total_shares
         existing.avg_cost = new_avg
@@ -460,7 +459,7 @@ def buy(
         symbol=symbol,
         action="BUY",
         shares=shares,
-        price=price,
+        price=effective_price,
         total=total,
         fee=fee,
         net_cash_delta=-cost,
@@ -505,9 +504,14 @@ def sell(
         shares_to_sell = shares
 
     proceeds = round(shares_to_sell * price, 2)
-    fee = _fee_for(proceeds)
-    net = round(proceeds - fee, 2)
-    realised = round((price - existing.avg_cost) * shares_to_sell, 2)
+    from .. import config as _cfg
+    cost_info = _cfg.trade_cost(proceeds, price)
+    fee = cost_info["fee"]
+    slip = cost_info["slippage"]
+    # Slippage lowers the effective sell price (you receive less than mid).
+    effective_sell_price = round(price * (1 - (slip / proceeds if proceeds else 0)), 4) if proceeds else price
+    net = round(proceeds - fee - slip, 2)
+    realised = round((effective_sell_price - existing.avg_cost) * shares_to_sell, 2)
 
     new_cash = round(state.cash + net, 2)
     remaining_shares = existing.shares - shares_to_sell
@@ -528,7 +532,7 @@ def sell(
         symbol=symbol,
         action="SELL",
         shares=shares_to_sell,
-        price=price,
+        price=effective_sell_price,
         total=proceeds,
         fee=fee,
         net_cash_delta=net,

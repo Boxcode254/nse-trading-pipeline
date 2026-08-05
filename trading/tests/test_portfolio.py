@@ -96,20 +96,26 @@ def test_engine_init_rejects_zero_capital() -> None:
 
 def test_buy_records_transaction_and_updates_state() -> None:
     from trading.portfolio import engine as pf
+    from trading import config as _cfg
     pf.init_portfolio(capital=100_000.0, force=True)
     state, txn = pf.buy("SCOM", 100, 42.5, reason="Strong buy")
-    expected_fee = max(round(100 * 42.5 * pf.TRANSACTION_FEE_PCT, 2), pf.FEE_MIN)
-    assert state.cash == round(100_000.0 - 100 * 42.5 - expected_fee, 2)
+    cinfo = _cfg.trade_cost(100 * 42.5, 42.5)  # value=4250
+    expected_fee = cinfo["fee"]
+    expected_slip = cinfo["slippage"]
+    expected_cost = round(4250.0 + expected_fee + expected_slip, 2)
+    assert state.cash == round(100_000.0 - expected_cost, 2)
     assert txn.action == "BUY"
     assert txn.symbol == "SCOM"
     assert txn.shares == 100
-    assert txn.price == 42.5
+    # effective price now includes slippage (slightly above mid)
+    assert txn.price > 42.5
     assert txn.total == 4250.0
     assert txn.fee == expected_fee
-    assert txn.net_cash_delta == round(-(4250.0 + expected_fee), 2)
+    assert txn.net_cash_delta == round(-expected_cost, 2)
     assert txn.realised_pnl is None
     assert state.positions[0].shares == 100
-    assert state.positions[0].avg_cost == 42.5
+    # effective price (incl. slippage) is slightly above mid 42.5
+    assert state.positions[0].avg_cost > 42.5
 
 
 def test_buy_weighted_average_cost_basis() -> None:
@@ -117,10 +123,11 @@ def test_buy_weighted_average_cost_basis() -> None:
     pf.init_portfolio(capital=100_000.0, force=True)
     pf.buy("SCOM", 100, 40.0)
     state, _ = pf.buy("SCOM", 100, 50.0)
-    # Weighted avg = (100*40 + 100*50) / 200 = 45.0
+    # Weighted avg of mid prices = (100*40 + 100*50)/200 = 45.0; with slippage
+    # the effective cost basis is slightly ABOVE 45.0 (slippage adds to each fill).
     assert state.positions[0].shares == 200
-    assert state.positions[0].avg_cost == 45.0
-    assert state.positions[0].total_cost == 9000.0
+    assert state.positions[0].avg_cost > 45.0
+    assert state.positions[0].total_cost > 9000.0
 
 
 def test_buy_rejects_insufficient_cash() -> None:
@@ -143,15 +150,21 @@ def test_buy_rejects_zero_or_negative_shares() -> None:
 
 def test_sell_partial_keeps_position() -> None:
     from trading.portfolio import engine as pf
+    from trading import config as _cfg
     pf.init_portfolio(capital=100_000.0, force=True)
     pf.buy("SCOM", 100, 40.0)
+    buy_info = _cfg.trade_cost(100 * 40.0, 40.0)
     state, txn = pf.sell("SCOM", 50, 50.0, reason="trim")
+    sell_info = _cfg.trade_cost(50 * 50.0, 50.0)
+    # realised = (effective_sell_price - effective_buy_price) * 50
+    eff_buy = 40.0 * (1 + buy_info["slippage"] / (100 * 40.0))
+    eff_sell = 50.0 * (1 - sell_info["slippage"] / (50 * 50.0))
     assert txn.action == "SELL"
     assert txn.shares == 50
-    assert txn.realised_pnl == round((50.0 - 40.0) * 50, 2)  # +500
+    assert txn.realised_pnl == round((eff_sell - eff_buy) * 50, 2)
     assert state.positions[0].shares == 50
-    # Cost basis reduced proportionally
-    assert state.positions[0].total_cost == round(100 * 40.0 * 0.5, 2)
+    # Cost basis reduced proportionally (effective buy cost)
+    assert state.positions[0].total_cost == round((100 * 40.0 + buy_info["slippage"]) * 0.5, 2)
 
 
 def test_sell_all_removes_position() -> None:
@@ -224,13 +237,16 @@ def test_compute_drawdown_zero_at_peak() -> None:
 
 def test_compute_holdings_value_uses_avg_cost_as_fallback() -> None:
     from trading.portfolio import engine as pf
+    from trading import config as _cfg
     pf.init_portfolio(capital=100_000.0, force=True)
     pf.buy("SCOM", 100, 42.5)
     state = pf.load_state()
-    # No price provided → falls back to avg_cost (no crash, value reconciles)
+    # No price provided → falls back to avg_cost (now incl. slippage), value reconciles
     holdings, rows = pf.compute_holdings_value(state, prices={})
-    assert holdings == round(100 * 42.5, 2)
-    assert rows[0]["last_price"] == 42.5
+    buy_info = _cfg.trade_cost(100 * 42.5, 42.5)
+    eff_buy = 42.5 * (1 + buy_info["slippage"] / (100 * 42.5))
+    assert holdings == round(100 * eff_buy, 2)
+    assert rows[0]["last_price"] == state.positions[0].avg_cost
 
 
 def test_transactions_log_is_append_only() -> None:
@@ -283,9 +299,14 @@ def test_service_buy_and_sell_with_overridden_price() -> None:
     res = svc.buy("SCOM", 100, price=40.0, reason="test")
     assert res["status"] == "filled"
     assert res["transaction"]["shares"] == 100
+    from trading import config as _cfg
+    binfo = _cfg.trade_cost(100 * 40.0, 40.0)
     res = svc.sell("SCOM", shares=50, price=55.0, reason="trim")
+    sinfo = _cfg.trade_cost(50 * 55.0, 55.0)
+    eff_buy = 40.0 * (1 + binfo["slippage"] / (100 * 40.0))
+    eff_sell = 55.0 * (1 - sinfo["slippage"] / (50 * 55.0))
     assert res["status"] == "filled"
-    assert res["transaction"]["realised_pnl"] == round((55.0 - 40.0) * 50, 2)
+    assert res["transaction"]["realised_pnl"] == round((eff_sell - eff_buy) * 50, 2)
 
 
 def test_service_snapshot_appends_series() -> None:
@@ -359,7 +380,8 @@ def test_cli_buy_with_explicit_price() -> None:
     data = json.loads(res.output)
     assert data["side"] == "BUY"
     assert data["shares"] == 100
-    assert data["price"] == 42.5
+    # effective fill price now includes slippage (slightly above requested 42.50)
+    assert data["price"] > 42.5
 
 
 def test_cli_buy_rejects_overdraw() -> None:
@@ -388,8 +410,13 @@ def test_cli_sell_partial_and_full() -> None:
     assert res.exit_code == 0
     data = json.loads(res.output)
     assert data["shares"] == 40
-    # Realised PnL = (55 - 40) * 40 = 600
-    assert data["realised_pnl"] == 600.0
+    # Realised PnL = (eff_sell - eff_buy) * 40, with slippage applied both sides
+    from trading import config as _cfg
+    binfo = _cfg.trade_cost(100 * 40.0, 40.0)
+    sinfo = _cfg.trade_cost(40 * 55.0, 55.0)
+    eff_buy = 40.0 * (1 + binfo["slippage"] / (100 * 40.0))
+    eff_sell = 55.0 * (1 - sinfo["slippage"] / (40 * 55.0))
+    assert data["realised_pnl"] == round((eff_sell - eff_buy) * 40, 2)
     # Remaining position
     assert data["remaining_position"]["shares"] == 60
     # Sell all (omit --shares)
