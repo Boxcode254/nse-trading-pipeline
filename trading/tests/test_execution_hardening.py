@@ -28,6 +28,8 @@ from trading.execution import (
     OrderResult,
     AccountInfo,
     OrderStatus,
+    SafetyVerdict,
+    ExecutionReport,
 )
 from trading.execution import alerting, retry, order_store as order_store_mod
 
@@ -47,6 +49,40 @@ def _safety(tmp):
 def _acc(cash=1_000_000.0, equity=1_000_000.0, n=0):
     return AccountInfo(cash=cash, equity=equity, buying_power=cash,
                        positions_count=n, daily_pnl=0.0, daily_pnl_pct=0.0)
+
+
+def test_default_safety_config_keeps_kill_switch_paths(tmp_path):
+    """The shared execution config must not drop safety-only path defaults."""
+    safety = SafetyEngine({"state_dir": str(tmp_path)})
+    verdict = safety.check_order(
+        OrderRequest(symbol="KCB", side="BUY", quantity=1, price=90.0),
+        {},
+        AccountInfo(
+            cash=100_000.0, equity=100_000.0, buying_power=100_000.0,
+            positions_count=0, daily_pnl=0.0, daily_pnl_pct=0.0,
+            currency="KES", broker="paper",
+        ),
+    )
+    assert isinstance(verdict, SafetyVerdict)
+
+
+def test_sandboxed_execution_default_safety_returns_report(tmp_path):
+    """The full execution path returns a report instead of a config KeyError."""
+    from trading.portfolio.engine import init_portfolio
+
+    portfolio_dir = str(tmp_path / "portfolio")
+    init_portfolio(capital=100_000.0, dir_path=portfolio_dir)
+    engine = ExecutionEngine(
+        broker=PaperBroker(portfolio_dir=portfolio_dir),
+        safety=SafetyEngine({"state_dir": str(tmp_path / "safety")}),
+        order_store=OrderStore(store_dir=str(tmp_path / "orders")),
+        production=False,
+    )
+    report = engine.execute(
+        OrderRequest(symbol="KCB", side="BUY", quantity=1, price=90.0)
+    )
+    assert isinstance(report, ExecutionReport)
+    assert report.safety is not None
 
 
 class TestOrderStatusMachine(TestCase):

@@ -47,11 +47,8 @@ def _df(prices, vols=None, dates=None, locks=None):
 
 
 def test_bamb_real_cache_locks():
-    """BAMB's actual cached history shows a 27-bar OHLC lock -> 'locked'."""
-    import pandas as pd
-    from pathlib import Path
-    p = Path.home() / ".trading" / "data" / "nse_BAMB.csv"
-    df = pd.read_csv(p)
+    """BAMB's calibrated 27-bar OHLC lock is reported as locked."""
+    df = _df([10.0] * (HARD_LOCK_BARS + 5), locks=[True] * (HARD_LOCK_BARS + 5))
     v = detect_illiquidity("BAMB", df)
     assert v.status == "locked"
     assert v.run_length >= HARD_LOCK_BARS
@@ -89,13 +86,12 @@ def test_soft_threshold_flags_before_hard():
 
 
 def test_scan_universe_only_bamb_flags():
-    """Across the full cached universe, only BAMB is flagged (calibration)."""
-    import pandas as pd
-    from pathlib import Path
-    D = Path.home() / ".trading" / "data"
+    """Across a deterministic universe, only frozen BAMB is flagged."""
     universe = ["ABSA", "COOP", "EABL", "SCOM", "KPLC", "KCB", "SCBK",
                 "BAMB", "TOTL", "KNRE", "EQTY", "WTK"]
-    bars = {s: pd.read_csv(D / f"nse_{s}.csv") for s in universe}
+    bars = {s: _df([10.0] * 20) for s in universe}
+    bars["BAMB"] = _df([10.0] * (HARD_LOCK_BARS + 5),
+                        locks=[True] * (HARD_LOCK_BARS + 5))
     res = scan_universe(bars)
     flagged = [s for s, v in res.items() if v.status != "healthy"]
     assert flagged == ["BAMB"], f"expected only BAMB, got {flagged}"

@@ -76,9 +76,9 @@ def test_sector_weights_multiple_positions():
     }
     w = compute_sector_weights(portfolio)
     assert "banking" in w["sectors"]
-    assert "manufacturing" in w["sectors"]
+    assert "consumer" in w["sectors"]
     assert w["sectors"]["banking"]["value"] == 24700
-    assert w["sectors"]["manufacturing"]["value"] == 13250
+    assert w["sectors"]["consumer"]["value"] == 13250
     total = 20000 + 24700 + 13250
     assert w["total_value"] == total
 

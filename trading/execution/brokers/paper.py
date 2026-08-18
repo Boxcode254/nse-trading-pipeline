@@ -69,9 +69,22 @@ class PaperBroker(BrokerBase):
     def get_account(self) -> AccountInfo:
         from ...portfolio.engine import load_state
         state = load_state(self.portfolio_dir)
+        try:
+            from ...price_source import resolve_prices
+            prices = resolve_prices(
+                [p.symbol for p in state.positions], self.portfolio_dir
+            ).prices
+            position_value = sum(
+                p.shares * prices.get(
+                    p.symbol, p.total_cost / p.shares if p.shares else 0.0
+                )
+                for p in state.positions
+            )
+        except Exception:
+            position_value = sum(p.total_cost for p in state.positions)
         return AccountInfo(
             cash=state.cash,
-            equity=state.cash + sum(p.total_cost for p in state.positions),
+            equity=state.cash + position_value,
             buying_power=state.cash,
             positions_count=len(state.positions),
             daily_pnl=0.0,
@@ -83,11 +96,23 @@ class PaperBroker(BrokerBase):
     def get_positions(self) -> list[BrokerPosition]:
         from ...portfolio.engine import load_state
         state = load_state(self.portfolio_dir)
+        try:
+            from ...price_source import resolve_prices
+            prices = resolve_prices(
+                [p.symbol for p in state.positions], self.portfolio_dir
+            ).prices
+        except Exception:
+            prices = {}
         return [
             BrokerPosition(
                 symbol=p.symbol,
                 quantity=p.shares,
-                market_value=p.total_cost,
+                market_value=round(
+                    p.shares * prices.get(
+                        p.symbol, p.total_cost / p.shares if p.shares else 0.0
+                    ),
+                    2,
+                ),
                 cost_basis=p.avg_cost,
                 unrealized_pnl=0.0,
                 unrealized_pnl_pct=0.0,

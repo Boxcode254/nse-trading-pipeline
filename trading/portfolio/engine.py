@@ -75,10 +75,15 @@ class Position:
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
-        # Persist a non-zero current_value so it's always reported even for
-        # suspended / no-price names. Fall back to cost basis (total_cost)
-        # when no live price is available — the caller (MTM layer) enriches
-        # separately in mtm_state.json with live prices and P&L.
+        # current_value is a PLACEHOLDER here (cost basis) and is not the
+        # authoritative market value. _save_state() overwrites it via
+        # trading.price_source.apply_authoritative_prices() before the file is
+        # written, so state.json always lands with a live-resolved price.
+        #
+        # Do NOT treat this line as the price of record: on its own it reset
+        # every position to cost basis on each save (proven: 10/11 positions
+        # wiped by one _save_state()). It survives only as the last-resort
+        # fallback for names with no price from any source (e.g. suspended).
         d["current_value"] = round(d["total_cost"], 2)
         return d
 
@@ -181,9 +186,11 @@ class Snapshot:
     drawdown_pct: float
     benchmark_value: float
     prices: dict[str, float] = field(default_factory=dict)  # symbol -> last close
+    price_source: dict[str, str] = field(default_factory=dict)  # symbol -> "axys" | "feed"
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        d = asdict(self)
+        return d
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "Snapshot":
@@ -197,6 +204,7 @@ class Snapshot:
             drawdown_pct=float(d.get("drawdown_pct", 0.0)),
             benchmark_value=float(d.get("benchmark_value", 0.0)),
             prices=dict(d.get("prices", {})),
+            price_source=dict(d.get("price_source", {})),
         )
 
 
@@ -396,10 +404,29 @@ def _save_state(state: PortfolioState, dir_path: Optional[str] = None) -> None:
         except (OSError, json.JSONDecodeError):
             pass
 
-    _write_json(state_path, state.to_dict())
+    payload = state.to_dict()
+
+    # PRICE CHOKEPOINT (write side).
+    # Position.to_dict() emits current_value = total_cost as a placeholder. Left
+    # alone, that reset every position's market value to COST BASIS on every
+    # trade. Resolve the price live from the authority chain (AXYS official
+    # close > mtm_state feed > CSV cache) so state.json can never be written
+    # with a cost-basis or stale-feed price.
+    #
+    # PRICE FIELD ONLY: shares, avg_cost, total_cost, cash and the transaction
+    # ledger are untouched by this call. Fail-open -- a pricing problem must
+    # never block persisting an executed trade.
+    try:
+        from trading import price_source
+
+        price_source.apply_authoritative_prices(payload, dir_path, previous=prev)
+    except Exception:  # noqa: BLE001
+        pass
+
+    _write_json(state_path, payload)
 
     # Log before/after diff to state_changes.log
-    _log_state_change(prev, state.to_dict(), dir_path)
+    _log_state_change(prev, payload, dir_path)
 
 
 # ── Trading primitives ────────────────────────────────────────────────────
@@ -437,10 +464,13 @@ def buy(
 
     new_cash = round(state.cash - cost, 2)
     existing = state.position_for(symbol)
-    effective_total = round(total + slip, 2)  # mid value + slippage paid
+    # Cost basis includes every BUY-side cash outflow. Keeping the fee in
+    # avg_cost lets a later SELL realise the full round-trip P&L.
+    effective_total = round(total + fee + slip, 2)
     if existing is None:
         state.positions.append(Position(
-            symbol=symbol, shares=shares, avg_cost=effective_price, total_cost=effective_total,
+            symbol=symbol, shares=shares,
+            avg_cost=round(effective_total / shares, 4), total_cost=effective_total,
         ))
     else:
         # Weighted-average cost basis (use effective cost incl. slippage)
@@ -511,7 +541,9 @@ def sell(
     # Slippage lowers the effective sell price (you receive less than mid).
     effective_sell_price = round(price * (1 - (slip / proceeds if proceeds else 0)), 4) if proceeds else price
     net = round(proceeds - fee - slip, 2)
-    realised = round((effective_sell_price - existing.avg_cost) * shares_to_sell, 2)
+    # The position's avg_cost includes the BUY-side fee and slippage; the
+    # explicit SELL fee is deducted here, while sell slippage is in price.
+    realised = round((effective_sell_price - existing.avg_cost) * shares_to_sell - fee, 2)
 
     new_cash = round(state.cash + net, 2)
     remaining_shares = existing.shares - shares_to_sell
@@ -563,23 +595,64 @@ def compute_drawdown(snapshots: list[Snapshot]) -> list[float]:
     return out
 
 
+def _load_axys_closes(dir_path: Optional[str] = None) -> dict[str, float]:
+    """Return {symbol: official NSE close} from the newest axys_closes file.
+
+    Mirrors trading.portfolio_mtm._load_axys_overrides's price source so the
+    equity curve uses the SAME official tape as the MTM widget. Returns {} when
+    no axys_closes file exists within the trailing 7 days (caller falls back to
+    feed and tags the price as 'feed').
+    """
+    import datetime as _dt
+    base = Path(dir_path) if dir_path else Path(_default_portfolio_dir())
+    try:
+        for back in range(0, 7):
+            d = (_dt.date.today() - _dt.timedelta(days=back)).isoformat()
+            p = base / f"axys_closes_{d}.json"
+            if p.exists():
+                data = json.loads(p.read_text())
+                return {k: float(v) for k, v in data.get("axys", {}).items()}
+    except Exception:
+        pass
+    return {}
+
+
 def take_snapshot(
     prices: dict[str, float],
     dir_path: Optional[str] = None,
 ) -> Snapshot:
     """Compute and append a mark-to-market snapshot.
 
-    ``prices`` maps symbol -> latest close. The benchmark is recomputed
-    as the equal-weighted buy-and-hold return of the assets in the
-    benchmark basket since the first snapshot was recorded.
+    ``prices`` maps symbol -> latest close (typically the live feed, as the
+    auto-trader calls this at trade time). For auditability and correctness,
+    each symbol is priced from the AXYS official NSE close when available
+    (same source the MTM widget uses), and the chosen source is recorded
+    per-symbol in ``price_source``. Feed is used only as a fallback when no
+    AXYS close exists for that day, and is then explicitly tagged 'feed'.
+
+    This makes every historical and future equity-curve point auditable for
+    which price source priced it.
     """
     state = load_state(dir_path)
     snaps = load_snapshots(dir_path)
     bench = load_benchmark(dir_path)
 
+    # Price-source resolution: prefer AXYS official close, fall back to feed.
+    axys_close = _load_axys_closes(dir_path)
+    effective_prices: dict[str, float] = {}
+    price_source: dict[str, str] = {}
+    for pos in state.positions:
+        sym = pos.symbol
+        if sym in axys_close and axys_close[sym]:
+            effective_prices[sym] = axys_close[sym]
+            price_source[sym] = "axys"
+        else:
+            effective_prices[sym] = float(prices.get(sym, pos.avg_cost))
+            price_source[sym] = "feed"
+
     holdings_value = round(
         sum(
-            pos.shares * float(prices.get(pos.symbol, pos.avg_cost))
+            pos.shares * effective_prices.get(pos.symbol, pos.avg_cost)
             for pos in state.positions
         ),
         2,
@@ -598,15 +671,11 @@ def take_snapshot(
         (total_value - state.initial_capital) / state.initial_capital * 100.0
     )
 
-    # Benchmark — initialise on first snapshot
+    # Benchmark — initialise on first snapshot (use effective/AXYS prices)
     if not bench.get("init_prices") and state.positions:
-        # Seed benchmark init_prices with current price for each held asset,
-        # plus any monitor asset we can fetch.
-        for sym, px in prices.items():
+        for sym, px in effective_prices.items():
             bench.setdefault("init_prices", {})[sym] = float(px)
-    # Always update benchmark init_prices for assets that don't have one yet
-    # using the latest known close — only on the very first snapshot for that asset.
-    for sym, px in prices.items():
+    for sym, px in effective_prices.items():
         if sym not in bench.setdefault("init_prices", {}):
             bench["init_prices"][sym] = float(px)
 
@@ -617,7 +686,7 @@ def take_snapshot(
     if init_prices:
         ratios: list[float] = []
         for sym, init_px in init_prices.items():
-            cur_px = prices.get(sym)
+            cur_px = effective_prices.get(sym)
             if cur_px is None or cur_px <= 0 or init_px <= 0:
                 continue
             ratios.append(cur_px / init_px)
@@ -637,7 +706,8 @@ def take_snapshot(
         total_return_pct=round(total_ret, 4),
         drawdown_pct=0.0,  # filled below
         benchmark_value=benchmark_value,
-        prices=dict(prices),
+        prices=dict(effective_prices),
+        price_source=dict(price_source),
     )
     snaps.append(snap)
     drawdowns = compute_drawdown(snaps)

@@ -285,6 +285,17 @@ def main() -> int:
     explicit = parse_full_table(text)
     narrative = {}  # retained for completeness; full table supersedes it
 
+    # STRUCTURAL GUARD: a file with NO price rows means this PDF has no
+    # valuation table (e.g. "Daily Whispers" analyst commentary). Writing a
+    # closes file from it would produce a SILENT no-op that later blocks the
+    # real Market Watch reconcile. Fail loud, write nothing.
+    if not explicit:
+        print(f"\u26d4 NO PRICE TABLE in PDF: {os.path.basename(pdf)}\n"
+              f"   This looks like an analyst-commentary report (e.g. Daily Whispers),\n"
+              f"   not a Daily Market Watch price-close file. Refusing to emit a\n"
+              f"   closes file. Forward the Daily_Market_Watch PDF to reconcile.")
+        return 2
+
     mtm = json.load(open(MTM_PATH))
     mtm_pos = {p["symbol"]: p for p in mtm["positions"]}
 

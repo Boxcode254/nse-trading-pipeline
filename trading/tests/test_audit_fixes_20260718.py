@@ -15,7 +15,12 @@ from unittest.mock import patch
 import pytest
 
 from trading import config
-from trading.auto_trader import _plan_delta, _sector_of, run_auto_trade
+from trading.auto_trader import (
+    _available_cash_for_buys,
+    _plan_delta,
+    _sector_of,
+    run_auto_trade,
+)
 from trading.target_allocation import (
     SECTOR_MAP as TA_SECTOR_MAP,
     STRATEGY,
@@ -43,6 +48,17 @@ def test_plan_delta_prefers_delta_shares():
     assert _plan_delta({"delta_shares": 10, "shares": 999}) == 10
     assert _plan_delta({"shares": 7}) == 7
     assert _plan_delta({}) == 0
+
+
+def test_available_cash_when_above_ten_percent_reserve():
+    available = _available_cash_for_buys(cash=15_000.0, total_before=100_000.0)
+    assert available == pytest.approx(5_000.0)
+
+
+def test_available_cash_floor_prevents_reserve_deadlock(monkeypatch):
+    monkeypatch.setattr(config, "CASH_RESERVE_PCT", 20.0)
+    available = _available_cash_for_buys(cash=16_320.34, total_before=103_241.25)
+    assert available == pytest.approx(816.017, abs=0.01)
 
 
 def test_jul17_freeze_regression_does_not_skip_as_target_met(tmp_path, monkeypatch):

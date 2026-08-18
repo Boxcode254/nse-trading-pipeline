@@ -17,6 +17,7 @@ if ROOT not in sys.path:
 from trading.execution import SafetyEngine, MacroBreaker
 from trading.execution.models import OrderRequest, AccountInfo
 from trading.execution.macro_breaker import MacroSnapshot
+from trading.auto_trader import _port_state_for_safety
 
 
 def _safety(tmp_state: str, **overrides) -> SafetyEngine:

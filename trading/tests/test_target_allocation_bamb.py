@@ -27,6 +27,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from trading import config
 
 # Make the trading package importable when run standalone
 ROOT = Path(__file__).resolve().parents[2]
@@ -224,14 +225,10 @@ def test_banking_blowout_fires_hard_cap():
 
 
 def test_banking_warn_cap_no_hard():
-    """Banking between WARN (55) and HARD (60) -> WARN_CAP, never HARD_CAP."""
+    """Banking between tiered WARN and HARD caps -> WARN_CAP only."""
     held = [
-        _pos("KCB", 350, 50.0),
-        _pos("EQTY", 250, 50.0),
-        _pos("ABSA", 200, 40.0),
-        _pos("SCBK", 150, 40.0),
-        _pos("COOP", 100, 40.0),
-        _pos("SCOM", 100, 25.0),
+        _pos("KCB", 420, 100.0),
+        _pos("SCOM", 100, 50.0),
         _pos("EABL", 18, 275.0),
     ]
     portfolio = _fake_portfolio(total_value=100000.0, positions=held)
@@ -244,8 +241,10 @@ def test_banking_warn_cap_no_hard():
     violations = plan.get("violations", [])
     warn = [v for v in violations if v["kind"] == "WARN_CAP" and v["sector"] == "banking"]
     hard = [v for v in violations if v["kind"] == "HARD_CAP"]
-    if any(v["sector"] == "banking" and v["current_pct"] > SECTOR_CAP_WARN_PCT
-           for v in violations):
-        assert warn, "banking over warn should produce WARN_CAP"
+    assert warn, f"banking above tiered warn should produce WARN_CAP: {violations}"
     assert not hard, "banking under hard cap must NOT produce HARD_CAP"
+
+
+def test_tiered_banking_caps_are_canonical():
+    assert config.sector_cap("banking") == {"warn": 40.0, "hard": 45.0}
 

@@ -156,15 +156,25 @@ def test_sell_partial_keeps_position() -> None:
     buy_info = _cfg.trade_cost(100 * 40.0, 40.0)
     state, txn = pf.sell("SCOM", 50, 50.0, reason="trim")
     sell_info = _cfg.trade_cost(50 * 50.0, 50.0)
-    # realised = (effective_sell_price - effective_buy_price) * 50
-    eff_buy = 40.0 * (1 + buy_info["slippage"] / (100 * 40.0))
+    # realised includes both-side fees; slippage is in effective prices.
+    eff_buy = (100 * 40.0 + buy_info["fee"] + buy_info["slippage"]) / 100
     eff_sell = 50.0 * (1 - sell_info["slippage"] / (50 * 50.0))
     assert txn.action == "SELL"
     assert txn.shares == 50
-    assert txn.realised_pnl == round((eff_sell - eff_buy) * 50, 2)
+    assert txn.realised_pnl == round((eff_sell - eff_buy) * 50 - sell_info["fee"], 2)
     assert state.positions[0].shares == 50
-    # Cost basis reduced proportionally (effective buy cost)
-    assert state.positions[0].total_cost == round((100 * 40.0 + buy_info["slippage"]) * 0.5, 2)
+    # Cost basis reduced proportionally (effective buy cost incl. fee)
+    assert state.positions[0].total_cost == round((100 * 40.0 + buy_info["fee"] + buy_info["slippage"]) * 0.5, 2)
+
+
+def test_sell_same_price_realises_both_side_costs() -> None:
+    from trading.portfolio import engine as pf
+    from trading import config as _cfg
+    pf.init_portfolio(capital=100_000.0, force=True)
+    pf.buy("SCOM", 100, 50.0)
+    _, txn = pf.sell("SCOM", 100, 50.0)
+    info = _cfg.trade_cost(100 * 50.0, 50.0)
+    assert txn.realised_pnl == -round(2 * (info["fee"] + info["slippage"]), 2)
 
 
 def test_sell_all_removes_position() -> None:
@@ -244,7 +254,7 @@ def test_compute_holdings_value_uses_avg_cost_as_fallback() -> None:
     # No price provided → falls back to avg_cost (now incl. slippage), value reconciles
     holdings, rows = pf.compute_holdings_value(state, prices={})
     buy_info = _cfg.trade_cost(100 * 42.5, 42.5)
-    eff_buy = 42.5 * (1 + buy_info["slippage"] / (100 * 42.5))
+    eff_buy = (100 * 42.5 + buy_info["fee"] + buy_info["slippage"]) / 100
     assert holdings == round(100 * eff_buy, 2)
     assert rows[0]["last_price"] == state.positions[0].avg_cost
 
@@ -303,10 +313,10 @@ def test_service_buy_and_sell_with_overridden_price() -> None:
     binfo = _cfg.trade_cost(100 * 40.0, 40.0)
     res = svc.sell("SCOM", shares=50, price=55.0, reason="trim")
     sinfo = _cfg.trade_cost(50 * 55.0, 55.0)
-    eff_buy = 40.0 * (1 + binfo["slippage"] / (100 * 40.0))
+    eff_buy = (100 * 40.0 + binfo["fee"] + binfo["slippage"]) / 100
     eff_sell = 55.0 * (1 - sinfo["slippage"] / (50 * 55.0))
     assert res["status"] == "filled"
-    assert res["transaction"]["realised_pnl"] == round((eff_sell - eff_buy) * 50, 2)
+    assert res["transaction"]["realised_pnl"] == round((eff_sell - eff_buy) * 50 - sinfo["fee"], 2)
 
 
 def test_service_snapshot_appends_series() -> None:
@@ -414,9 +424,9 @@ def test_cli_sell_partial_and_full() -> None:
     from trading import config as _cfg
     binfo = _cfg.trade_cost(100 * 40.0, 40.0)
     sinfo = _cfg.trade_cost(40 * 55.0, 55.0)
-    eff_buy = 40.0 * (1 + binfo["slippage"] / (100 * 40.0))
+    eff_buy = (100 * 40.0 + binfo["fee"] + binfo["slippage"]) / 100
     eff_sell = 55.0 * (1 - sinfo["slippage"] / (40 * 55.0))
-    assert data["realised_pnl"] == round((eff_sell - eff_buy) * 40, 2)
+    assert data["realised_pnl"] == round((eff_sell - eff_buy) * 40 - sinfo["fee"], 2)
     # Remaining position
     assert data["remaining_position"]["shares"] == 60
     # Sell all (omit --shares)
@@ -558,16 +568,19 @@ def test_axys_override_no_direction_contradiction() -> None:
     }))
 
     # Today's AXYS official closes (the tape wins).
+    import datetime
+    today_date = datetime.date.today()
+    prev_date = today_date - datetime.timedelta(days=1)
     today = {"KCB": 86.0}
     # Prior-day AXYS closes -> close-to-close is +0.88% (up).
     yesterday = {"KCB": 85.25}
-    (portfolio_dir / "axys_closes_2026-07-31.json").write_text(json.dumps({
+    (portfolio_dir / f"axys_closes_{today_date.isoformat()}.json").write_text(json.dumps({
         "date": "31st July 2026", "pdf": "dummy.pdf",
         "axys": today, "narrative_direction": {},
         "rows": [{"symbol": "KCB", "flag": "PRICE 0.82% off AXYS"}],
         "applied_override": 0,
     }))
-    (portfolio_dir / "axys_closes_2026-07-30.json").write_text(json.dumps({
+    (portfolio_dir / f"axys_closes_{prev_date.isoformat()}.json").write_text(json.dumps({
         "date": "30th July 2026", "pdf": "dummy.pdf",
         "axys": yesterday, "narrative_direction": {}, "rows": [],
         "applied_override": 0,

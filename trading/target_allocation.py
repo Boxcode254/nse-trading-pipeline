@@ -66,6 +66,51 @@ PORTFOLIO_DIR = Path.home() / ".trading" / "portfolio"
 MTM_PATH = PORTFOLIO_DIR / "mtm_state.json"
 STATE_PATH = PORTFOLIO_DIR / "state.json"
 
+# ── Learning loop: consume APPROVED learned signal gates ───────────────────
+# The rebalancer gates every BUY on signal >= SIGNAL_GATE_MIN (50) and every
+# SELL-trim-hold on signal >= 75. The learning engine (trading.learning_engine)
+# can TUNE these per symbol from realised outcomes, but ONLY after a human
+# approves the proposal via Telegram. Approved gates live in learned_gates.json.
+#
+# FAIL-OPEN: load_learned_gates() returns {} on any error / missing file, so
+# the rebalancer always falls back to the base gates below. Learning can only
+# narrow or widen within hard bounds; it can never disable a gate.
+_LEARNED_GATES: Optional[dict[str, dict[str, float]]] = None
+
+
+def _learned_gates() -> dict[str, dict[str, float]]:
+    """Memoised load of approved learned gates (fail-open)."""
+    global _LEARNED_GATES
+    if _LEARNED_GATES is None:
+        try:
+            from trading.learning_engine import load_learned_gates
+            _LEARNED_GATES = load_learned_gates() or {}
+        except Exception:
+            _LEARNED_GATES = {}
+    return _LEARNED_GATES
+
+
+def learned_gate_for(symbol: str, *, kind: str = "buy") -> float:
+    """Return the effective signal gate for ``symbol``.
+
+    ``kind`` is 'buy' (BUY entry gate) or 'sell_hold' (SELL-trim-hold gate).
+    Falls back to the base constants when no approved override exists or the
+    learned store is unavailable. Always returns a sane float.
+    """
+    key = "buy_gate" if kind == "buy" else "sell_hold_gate"
+    base = SIGNAL_GATE_MIN if kind == "buy" else 75.0
+    gates = _learned_gates()
+    g = gates.get(symbol) or gates.get("ANY")
+    if not g:
+        return base
+    return float(g.get(key, base))
+
+
+def reset_learned_gates_cache() -> None:
+    """Clear the memoised gate cache (used by tests / approver)."""
+    global _LEARNED_GATES
+    _LEARNED_GATES = None
+
 # ── Sector Classification (canonical — from config) ────────────────────────
 SECTOR_MAP: dict[str, str] = dict(config.SECTOR_MAP)
 
@@ -736,8 +781,9 @@ def generate_rebalance_plan(
             sell_shares = max(1, int(sell_value / price))
 
             # Signal gate: don't sell if signal says Accumulate+
+            # (uses learned SELL-trim-hold gate when approved; fail-open to 75).
             sig = signal_map.get(sym, 50)
-            if sig >= 75:
+            if sig >= learned_gate_for(sym, kind="sell_hold"):
                 continue  # Signal says accumulate — hold despite over-weight
 
             trades.append(_delta_trade(
@@ -756,8 +802,8 @@ def generate_rebalance_plan(
     for sec, info in targets["current"].items():
         if info["action"] not in ("add",):
             continue
-        # Concentration guard: never ADD to a sector already at/over HARD cap
-        if info.get("current_pct", 0.0) > SECTOR_CAP_HARD_PCT:
+        # Concentration guard: never ADD to a sector already at/over HARD cap.
+        if info.get("current_pct", 0.0) > config.sector_cap(sec)["hard"]:
             continue
         # Risk weights across the sector's stock list (fail-open to equal).
         rweights = _risk_weights_for_sector(
@@ -767,9 +813,9 @@ def generate_rebalance_plan(
         for sym in info["stocks_in_sector"]:
             if sym in current_stocks:
                 continue  # Already holding — allocation covers it
-            # New position — check signal gate
+            # New position — check signal gate (learned BUY gate; fail-open to base)
             sig = signal_map.get(sym, 50)
-            if sig < SIGNAL_GATE_MIN:
+            if sig < learned_gate_for(sym, kind="buy"):
                 continue  # Signal too weak — wait
 
             price = prices.get(sym, 0)
@@ -812,8 +858,8 @@ def generate_rebalance_plan(
     for sec, info in targets["current"].items():
         if info["action"] != "add":
             continue
-        # Concentration guard: never ADD to a sector already at/over HARD cap
-        if info.get("current_pct", 0.0) > SECTOR_CAP_HARD_PCT:
+        # Concentration guard: never ADD to a sector already at/over HARD cap.
+        if info.get("current_pct", 0.0) > config.sector_cap(sec)["hard"]:
             continue
         # Risk weights across the sector's HELD names only (correlation-aware).
         held_in_sector_syms = [s for s in info["stocks_in_sector"] if s in current_stocks]
@@ -823,7 +869,7 @@ def generate_rebalance_plan(
         for sym in held_in_sector_syms:
             # We already hold this, but sector is under target — top up
             sig = signal_map.get(sym, 50)
-            if sig < SIGNAL_GATE_MIN:
+            if sig < learned_gate_for(sym, kind="buy"):
                 continue
 
             price = prices.get(sym, 0)

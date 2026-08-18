@@ -250,6 +250,9 @@ EXECUTION_CONFIG: dict[str, Any] = {
     # Stop-loss: a held position past this % loss (vs avg cost) blocks further
     # BUYs (no averaging down); SELLs stay allowed and are flagged.
     "stop_loss_pct": 8.0,
+    # Take-profit: a held position up this % (vs avg cost) is fully exited
+    # (sell the winner and leave). Full exit, not a partial trim. 0/None disables.
+    "take_profit_pct": 20.0,
     # Macro / volatility circuit breaker (NSE index / breadth / vol regime).
     # Fail-open: a missing/errored macro feed never trips the breaker.
     "macro_fail_open": True,
@@ -290,7 +293,7 @@ EXECUTION_CONFIG: dict[str, Any] = {
         "hard_uplift_pct": 10.0,    # HARD cap raised by this when momentum is up
     },
     # Cash reserve: fraction of portfolio to keep uninvested (vs opportunities)
-    "cash_reserve_pct": 20.0,
+    "cash_reserve_pct": 10.0,
     # Daily deployment cap: max percent of portfolio to deploy in a single day
     "daily_deployment_cap_pct": 50.0,
     # Minimum trade size in KES to avoid dust
@@ -325,6 +328,7 @@ DEFAULT_BROKER: str = EXECUTION_CONFIG["default_broker"]
 STATE_DIR: str = EXECUTION_CONFIG["state_dir"]
 MAX_DRAWDOWN_HALT_PCT: float = EXECUTION_CONFIG["max_drawdown_halt_pct"]
 STOP_LOSS_PCT: float = EXECUTION_CONFIG["stop_loss_pct"]
+TAKE_PROFIT_PCT: float = EXECUTION_CONFIG["take_profit_pct"]
 MACRO_FAIL_OPEN: bool = EXECUTION_CONFIG["macro_fail_open"]
 CASH_RESERVE_PCT: float = EXECUTION_CONFIG["cash_reserve_pct"]
 DAILY_DEPLOYMENT_CAP_PCT: float = EXECUTION_CONFIG["daily_deployment_cap_pct"]

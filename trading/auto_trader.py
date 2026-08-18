@@ -62,12 +62,38 @@ def _make_safety() -> SafetyEngine:
 
 
 def _load_state(portfolio_dir: Path) -> dict[str, Any]:
-    """Load the current portfolio state."""
+    """Load the current portfolio state with LIVE-RESOLVED prices.
+
+    PRICE CHOKEPOINT (read side). state.json's stored current_value is a cached
+    write and can be stale: the official NSE close lands at the 19:30 AXYS
+    reconcile, which writes mtm_state.json only -- nothing re-stamps state.json
+    afterwards, so the book could sit on an intraday feed price indefinitely
+    (proven: EABL stuck at 277.50 vs official 270.00, a 2.78% book error).
+
+    Rather than trust whatever a cron last cached, re-resolve every position's
+    price here from the authority chain (AXYS official close > mtm_state feed >
+    CSV cache). Sizing and allocation therefore always see the official tape
+    once it exists, regardless of cron ordering.
+
+    PRICE FIELD ONLY -- shares, avg_cost, total_cost and cash are read straight
+    off disk and never modified. Fail-open: if resolution errors, we return the
+    on-disk state unchanged rather than blocking the run.
+    """
     state_path = portfolio_dir / "state.json"
     if not state_path.exists():
         return {"cash": 0.0, "positions": [], "initial_capital": 0.0}
     with open(state_path) as f:
-        return json.load(f)
+        state = json.load(f)
+    try:
+        from trading import price_source
+
+        res = price_source.apply_authoritative_prices(
+            state, str(portfolio_dir), previous=state
+        )
+        state["_price_resolution"] = res.summary()
+    except Exception:  # noqa: BLE001
+        pass
+    return state
 
 
 def _mystocks_price(symbol: str) -> float | None:
@@ -542,16 +568,27 @@ def _port_state_for_safety(positions: list[dict]) -> dict[str, Any]:
     for p in positions:
         shares = p.get("shares", 0)
         avg_cost = p.get("avg_cost", 0.0)
-        if avg_cost and shares:
-            avg = avg_cost / shares
-        else:
-            avg = 0.0
+        # avg_cost in portfolio state is already the per-share cost basis.
+        # Dividing by shares corrupts every risk percentage.
+        avg = float(avg_cost) if avg_cost else 0.0
         norm_positions[p["symbol"]] = {
             "shares": shares,
             "avg_cost": avg,
             "value": p.get("current_value", 0.0) or (shares * p["avg_cost"]),
         }
     return {"positions": norm_positions}
+
+
+def _available_cash_for_buys(cash: float, total_before: float) -> float:
+    """Return cash available for buys without deadlocking a low-cash book."""
+    cash_reserve = total_before * (config.CASH_RESERVE_PCT / 100)
+    max_deploy_today = total_before * (config.DAILY_DEPLOYMENT_CAP_PCT / 100)
+    reserve_shortfall = cash - cash_reserve
+    if reserve_shortfall <= 0 and cash > config.MIN_TRADE_KES:
+        # Keep a small hard floor for deployment capacity while cash exists;
+        # a reserve configured above the current cash must not freeze all buys.
+        reserve_shortfall = cash * 0.05
+    return min(max(0.0, reserve_shortfall), max_deploy_today)
 
 
 def _account_info(cash: float, total_value: float, available_cash: float, positions_count: int) -> "AccountInfo":
@@ -821,6 +858,30 @@ def run_auto_trade(dry_run: bool = False) -> AutoTraderReport:
                     )
                 )
 
+    # 4b. Take-profit check: auto-sell positions that hit the gain threshold.
+    #     Mirrors the stop-loss step above (same helper shape, same
+    #     sl_portfolio_state), so a winner is fully exited ("sell and leave").
+    #     Never filtered by the gap-risk filter (auto_trader.py gap rule
+    #     excludes stop-loss AND sector-cap sells; take-profit is treated the
+    #     same — a hard rule, not a stale-signal skip).
+    for p in current_positions:
+        sym = p["symbol"]
+        tp = safety.should_take_profit(sym, sl_portfolio_state)
+        if tp is not None and tp["taken"]:
+            already_in_sell = any(s["symbol"] == sym for s in sell_list)
+            if not already_in_sell:
+                sell_list.append(
+                    dict(
+                        symbol=sym,
+                        delta_shares=int(p["shares"]),
+                        reason=(
+                            f"Take-profit triggered: {sym} is +{tp['gain_pct']:.1f}% "
+                            f"above avg cost of KES {tp['avg_cost']:.2f}"
+                        ),
+                        take_profit=True,
+                    )
+                )
+
     # Calculate sector exposure
     sector_current: dict[str, float] = {}
     for p in current_positions:
@@ -1061,9 +1122,7 @@ def run_auto_trade(dry_run: bool = False) -> AutoTraderReport:
             p["shares"] = holdings.get(p["symbol"], 0)
 
     # 9. Execute buys — plan qty is ALWAYS a delta (shares to buy now)
-    cash_reserve = total_before * (config.CASH_RESERVE_PCT / 100)
-    max_deploy_today = total_before * (config.DAILY_DEPLOYMENT_CAP_PCT / 100)
-    available_cash = min(max(0.0, cash - cash_reserve), max_deploy_today)
+    available_cash = _available_cash_for_buys(cash, total_before)
     # Track post-sell sector values so room-in-sector math reflects simulated sells
     sector_after_sells: dict[str, float] = {}
 

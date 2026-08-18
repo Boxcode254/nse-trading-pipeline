@@ -2,6 +2,7 @@
 
 import sqlite3
 import json
+import types
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Any
@@ -618,13 +619,18 @@ class LearningDB:
             """).fetchone()
             return dict(row) if row else {}
 
-    def get_monthly_stats(self, months: int = 12) -> List[Dict[str, Any]]:
-        """Get monthly stats from the monthly_stats view."""
+    def get_monthly_stats(self, months: int = 12) -> List[Any]:
+        """Get monthly stats from the monthly_stats view.
+
+        Returns SimpleNamespace objects (attribute access) ordered by month
+        DESC, so callers comparing index 0 (current) vs index 1 (previous) get
+        the correct month-over-month pairing.
+        """
         with self._conn() as conn:
             rows = conn.execute(
-                "SELECT * FROM monthly_stats LIMIT ?", (months,)
+                "SELECT * FROM monthly_stats ORDER BY month DESC LIMIT ?", (months,)
             ).fetchall()
-            return [dict(r) for r in rows]
+            return [types.SimpleNamespace(**dict(r)) for r in rows]
 
     def get_symbol_performance(self, symbol: str) -> Dict[str, Any]:
         """Get performance stats for a single symbol."""

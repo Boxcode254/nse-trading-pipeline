@@ -25,6 +25,43 @@ from .models import OrderRequest, OrderResult, SafetyVerdict, AccountInfo
 from .macro_breaker import MacroBreaker, DEFAULT_THRESHOLDS as _MACRO_DEFAULTS
 from .retry import call_with_timeout
 
+# Single source of truth: when available, the SafetyEngine's DEFAULTS come from
+# trading.config.EXECUTION_CONFIG so stop_loss_pct / take_profit_pct / etc. can
+# never drift from the one place they're tuned. The literal below is only a
+# fallback for isolated imports (e.g. unit tests that don't load the trading
+# package) and MUST stay in sync with EXECUTION_CONFIG for those cases.
+try:
+    from trading import config as _trading_config
+    _SAFETY_DEFAULTS = dict(_trading_config.EXECUTION_CONFIG)
+except Exception:  # pragma: no cover - import isolation guard
+    _SAFETY_DEFAULTS = None
+
+
+def _default_config() -> dict:
+    """Return the engine's default config, sourced from EXECUTION_CONFIG."""
+    # Keep safety-only defaults here even when EXECUTION_CONFIG is available:
+    # the execution config intentionally omits the filesystem paths used by
+    # the safety gate.  Merge the shared config over the complete fallback so
+    # shared thresholds win while required path defaults survive.
+    fallback = {
+        "max_trade_size_kes": 500_000.0,
+        "max_daily_loss_kes": 100_000.0,
+        "max_daily_loss_pct": 100.0,
+        "max_single_exposure_pct": 25.0,
+        "max_position_count": 20,
+        "enabled": True,
+        "emergency_stop_path": os.path.expanduser("~/.trading/execution/EMERGENCY_STOP"),
+        "max_drawdown_halt_pct": 15.0,
+        "stop_loss_pct": 8.0,
+        "take_profit_pct": 20.0,
+        "macro": dict(_MACRO_DEFAULTS),
+        "macro_fail_open": True,
+        "macro_state_path": os.path.expanduser("~/.trading/execution/macro_breaker.json"),
+    }
+    if _SAFETY_DEFAULTS is not None:
+        fallback.update(_SAFETY_DEFAULTS)
+    return fallback
+
 # Hard cap on the macro price scan so a slow upstream can never stall the run.
 _MACRO_FETCH_TIMEOUT = 15.0
 
@@ -33,33 +70,14 @@ class SafetyEngine:
     """Risk management layer that enforces trading limits."""
 
     def __init__(self, config: Optional[dict] = None):
-        """Initialize with config defaults + state persistence."""
-        # Config defaults
-        self.config = {
-            "max_trade_size_kes": 500_000.0,
-            "max_daily_loss_kes": 100_000.0,    # tracks actual realised losses
-            "max_daily_loss_pct": 100.0,        # effectively unlimited for paper
-            "max_single_exposure_pct": 25.0,
-            "max_position_count": 20,
-            "enabled": True,
-            "emergency_stop_path": os.path.expanduser(
-                "~/.trading/execution/EMERGENCY_STOP"
-            ),
-            # ── Phase 1 new defaults ──
-            # Drawdown halt: block all new trades when portfolio peak-to-current
-            # drawdown exceeds this %. 0 or None disables.
-            "max_drawdown_halt_pct": 15.0,
-            # Stop-loss: a held position whose loss exceeds this % (vs avg cost)
-            # is "stopped". The gate blocks BUYs that add to it; SELLs are
-            # allowed (and flagged). 0 or None disables the stop-loss check.
-            "stop_loss_pct": 8.0,
-            # Macro breaker config (merged into MacroBreaker thresholds).
-            "macro": dict(_MACRO_DEFAULTS),
-            "macro_fail_open": True,
-            "macro_state_path": os.path.expanduser(
-                "~/.trading/execution/macro_breaker.json"
-            ),
-        }
+        """Initialize with config defaults + state persistence.
+
+        Defaults come from ``_default_config()`` (trading.config.EXECUTION_CONFIG),
+        the single source of truth), so stop_loss_pct / take_profit_pct / etc.
+        always match what's tuned in one place. An explicit ``config`` dict is
+        merged on top (used by tests to override).
+        """
+        self.config = _default_config()
         if config:
             self.config.update(config)
 
@@ -239,6 +257,46 @@ class SafetyEngine:
         self._save_state()
 
     # ── Phase 1 helpers ───────────────────────────────────────────────
+    def should_take_profit(
+        self, symbol: str, portfolio_state: dict
+    ) -> Optional[dict]:
+        """Return take-profit status for a held symbol, or None if not held / disabled.
+
+        Mirror of :meth:`should_stop_loss` but for winners: reads the position's
+        avg cost and current value from ``portfolio_state`` (same dict the gate
+        uses) so this is a single source of truth shared by the auto-trader and
+        the manual CLI. When the gain vs avg cost reaches ``take_profit_pct``
+        the position is fully exited ("sell the winner and leave").
+
+        Returns a dict::
+            {"symbol", "taken": bool, "gain_pct": float,
+             "avg_cost": float, "current_price": float}
+        or ``None`` when the position is absent or take-profit is disabled
+        (``take_profit_pct`` is 0/None).
+        """
+        pct_cfg = self.config.get("take_profit_pct") or 0.0
+        if pct_cfg <= 0:
+            return None
+        pos = portfolio_state.get("positions", {}).get(symbol)
+        if not pos:
+            return None
+        avg_cost = pos.get("avg_cost")
+        shares = pos.get("shares") or 0
+        value = pos.get("value", 0.0) or 0.0
+        if not avg_cost or avg_cost <= 0 or shares <= 0:
+            # Fallback: no avg cost basis → cannot compute a gain%.
+            return None
+        current_price = value / shares if value else avg_cost
+        gain_pct = (current_price - avg_cost) / avg_cost * 100.0
+        return {
+            "symbol": symbol,
+            "taken": gain_pct >= pct_cfg,
+            "gain_pct": round(gain_pct, 2),
+            "avg_cost": round(float(avg_cost), 4),
+            "current_price": round(float(current_price), 4),
+        }
+
+
     def should_stop_loss(
         self, symbol: str, portfolio_state: dict
     ) -> Optional[dict]:
