@@ -162,6 +162,7 @@ def ingest(since_ts: Optional[str] = None, dry_run: bool = False) -> dict[str, A
             "price": float(t.get("price", 0) or 0),
             "shares": int(t.get("shares", 0) or 0),
             "pnl": float(rp),
+            "total": t.get("total"),  # needed to derive pnl_pct; was dropped before
             "reason": t.get("reason", "") or "",
         })
 
