@@ -1,5 +1,7 @@
 # NSE Paper Trading Pipeline
 
+> **© 2026 Emmanuel Angote. All rights reserved.** Proprietary, closed-source. Public for portfolio evaluation only. Full notice in [LICENSE](LICENSE).
+
 Private source backup for Emmanuel/Kratos’s Nairobi Securities Exchange (NSE) **paper** trading system.
 
 > **Runtime lives on the VPS at `~/.trading`.** Cron jobs execute this tree directly.  
