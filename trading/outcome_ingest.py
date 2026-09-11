@@ -9,6 +9,10 @@ Design rules (hard):
 * Read-only against transactions.json. Never mutates the ledger.
 * Idempotent: a checkpoint stores the last ingested txn timestamp; only
   NEW sells since that checkpoint are ingested, so re-running is safe.
+* Dedupe is loud, not silent: a row that collides with the table's
+  ``UNIQUE(symbol, exit_timestamp, shares, exit_price)`` key is skipped
+  and announced on stdout as ``DUPLICATE SKIPPED`` — never dropped
+  invisibly, and never counted as freshly ingested.
 * Symbol-level attribution only. The live ledger's ``signal_ref`` is
   empty (``{}``) on every historical sell, so per-factor attribution is
   impossible and we do NOT fabricate it. We attribute realised P&L to
@@ -78,6 +82,55 @@ def _init_db(conn: sqlite3.Connection) -> None:
     )
 
 
+# Single-row INSERT used by _insert_rows(). The table carries
+# UNIQUE(symbol, exit_timestamp, shares, exit_price); OR IGNORE makes a
+# colliding row a no-op instead of an error, which is the dedupe guard.
+_INSERT_SQL = """
+    INSERT OR IGNORE INTO realized_outcomes
+    (symbol, exit_timestamp, exit_price, shares, realised_pnl,
+     pnl_pct, hold_days, exit_reason, ingested_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+"""
+
+
+def _insert_rows(
+    conn: sqlite3.Connection,
+    rows_to_write: list[tuple],
+    result: dict[str, Any],
+) -> int:
+    """Insert outcome rows, announcing (not hiding) any the unique key rejects.
+
+    ``INSERT OR IGNORE`` drops a row that collides with the table's
+    ``UNIQUE(symbol, exit_timestamp, shares, exit_price)`` constraint without
+    raising. Relying on that alone is a trap: the row disappears silently and
+    any caller counting *attempted* rows over-reports how much was learned.
+    So each row is executed on its own and ``conn.total_changes`` decides
+    whether it actually landed. A rejected row is printed as a one-line
+    ``DUPLICATE SKIPPED`` (stdout is delivered to the trading channel by the
+    learning cron) and counted in ``result["duplicates_skipped"]``.
+
+    Returns the number of rows genuinely inserted.
+    """
+    inserted = 0
+    for row in rows_to_write:
+        before = conn.total_changes
+        conn.execute(_INSERT_SQL, row)
+        if conn.total_changes == before:
+            sym, ts = row[0], row[1]
+            print(
+                f"DUPLICATE SKIPPED: symbol={sym} exit_timestamp={ts} "
+                "(identical outcome already in realized_outcomes)",
+                flush=True,
+            )
+            result["duplicates_skipped"] += 1
+            result["duplicate_detail"].append(
+                {"symbol": sym, "exit_timestamp": ts}
+            )
+        else:
+            inserted += 1
+    return inserted
+
+
 def _load_checkpoint() -> Optional[str]:
     if _CHECKPOINT.exists():
         try:
@@ -117,6 +170,8 @@ def ingest(since_ts: Optional[str] = None, dry_run: bool = False) -> dict[str, A
     result: dict[str, Any] = {
         "ingested": 0,
         "skipped": 0,
+        "duplicates_skipped": 0,
+        "duplicate_detail": [],
         "new_checkpoint": since_ts,
         "first_run": since_ts is None,
         "errors": [],
@@ -195,16 +250,7 @@ def ingest(since_ts: Optional[str] = None, dry_run: bool = False) -> dict[str, A
     try:
         with sqlite3.connect(LEARNING_DB) as conn:
             _init_db(conn)
-            conn.executemany(
-                """
-                INSERT OR IGNORE INTO realized_outcomes
-                (symbol, exit_timestamp, exit_price, shares, realised_pnl,
-                 pnl_pct, hold_days, exit_reason, ingested_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                rows_to_write,
-            )
-            result["ingested"] = len(rows_to_write)
+            result["ingested"] = _insert_rows(conn, rows_to_write, result)
         _save_checkpoint(max_ts)
         result["new_checkpoint"] = max_ts
     except sqlite3.Error as e:
