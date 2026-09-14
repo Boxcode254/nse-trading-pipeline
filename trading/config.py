@@ -5,8 +5,12 @@ side-effect free so it can be imported from anywhere.
 """
 from __future__ import annotations
 
+import csv
 import os
-from typing import Any
+import warnings
+from datetime import date, datetime
+from pathlib import Path
+from typing import Any, Optional
 
 # Pairs to monitor. Two forex + twelve NSE-listed Kenyan equities.
 # Format is "BASE/QUOTE" for forex (e.g. "EUR/USD") and a plain ticker
@@ -420,14 +424,314 @@ def ensure_dirs() -> None:
 # Centralises the per-sector WARN/HARD caps (+ momentum uplift) so auto_trader
 # and target_allocation enforce the SAME numbers. Reads PRICES only (never news)
 # for the momentum gate.
-def sector_cap(sector: str) -> dict:
+#
+# TP-002 (2026-09-15) — the momentum uplift was silently disabled. Two defects:
+#   1. ``DATA_DIR`` is a ``str``, so ``DATA_DIR / f"nse_{sym}.csv"`` raised
+#      TypeError on the first member of every sector and the broad
+#      ``except Exception: pass`` hid it (no uplift was ever applied).
+#   2. There was no freshness contract: a months-old CSV could have granted a
+#      risk-ceiling uplift.
+# Both are repaired below. No cap, sector target, threshold, strategy weight or
+# evaluation gate was changed.
+
+# A CSV whose last session is older than this many calendar days cannot grant a
+# hard-cap uplift. The uplift RELAXES a risk ceiling, so it may only be granted
+# on fresh evidence. This is a safety bound, not a tuning knob; override per call
+# or via momentum_gate.max_staleness_days.
+MOMENTUM_MAX_STALENESS_DAYS: int = 7
+
+_CSV_DATE_KEYS = ("date", "Date", "DATE", "timestamp", "time", "as_of")
+
+# Diagnostics that must reach a human/operator instead of being swallowed.
+_MOMENTUM_DATA_PROBLEM_STATES = ("missing", "unreadable", "malformed", "stale")
+
+
+def _as_date(value) -> date:
+    """Normalise ``None``/``date``/``datetime`` to a ``date``.
+
+    Raises TypeError for anything else: a bad ``now=`` is a programmer error and
+    must not be silently replaced by "today" (that would make a freshness check
+    unverifiable).
+    """
+    if value is None:
+        return datetime.now().date()
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    raise TypeError(
+        f"sector momentum gate: now= must be a date/datetime, got {type(value).__name__} ({value!r})"
+    )
+
+
+def _row_close(row: dict) -> Optional[float]:
+    """Return the close-like value of a CSV row, or None when unreadable."""
+    value = _num(row)
+    if not value or value <= 0:
+        return None
+    return float(value)
+
+
+def _row_date(row: dict) -> tuple[Optional[date], str]:
+    """Return ``(session_date, state)`` for a CSV row.
+
+    state is ``"ok"`` (parsed from a date column), ``"no_date_column"`` (the
+    caller may fall back to the cache file mtime) or ``"malformed"`` (a date
+    column exists but the value cannot be read — never treated as fresh).
+    """
+    raw = None
+    for key in _CSV_DATE_KEYS:
+        value = row.get(key)
+        if value not in (None, ""):
+            raw = value
+            break
+    if raw is None:
+        return None, "no_date_column"
+    text = str(raw).strip()
+    for candidate in (text, text[:10]):
+        try:
+            return datetime.fromisoformat(candidate).date(), "ok"
+        except ValueError:
+            continue
+    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%d %b %Y", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(text, fmt).date(), "ok"
+        except ValueError:
+            continue
+    return None, "malformed"
+
+
+def sector_momentum_diagnostics(
+    sector: str,
+    *,
+    data_dir=None,
+    now=None,
+    max_staleness_days: Optional[int] = None,
+) -> dict:
+    """Explain WHY the sector momentum uplift did or did not apply. Read-only.
+
+    Returns a dict carrying ``applied`` (bool), a machine-readable ``reason``,
+    ``blocking`` (the data problems found, if any) and the per-member price
+    evidence behind the decision, so missing / unreadable / malformed / stale
+    input is inspectable rather than silently disabling the gate.
+
+    Conservative by construction: any member that is missing, unreadable,
+    malformed, future-dated or stale blocks the uplift for the whole sector. A
+    path-type error in ``data_dir`` raises TypeError instead of being swallowed.
+    """
+    resolved_upto = _as_date(now)
+
+    def _blank(reason: str, detail: str) -> dict:
+        return {
+            "sector": sector,
+            "applied": False,
+            "reason": reason,
+            "detail": detail,
+            "blocking": [],
+            "uplift_pct": None,
+            "effective_hard_uplift": 0.0,
+            "lookback_days": None,
+            "momentum_min_pct": None,
+            "max_staleness_days": None,
+            "avg_return_pct": None,
+            "members": [],
+            "evaluated_at": resolved_upto.isoformat(),
+        }
+
+    gate = EXECUTION_CONFIG.get("momentum_gate", {}) or {}
+    if not gate.get("enabled", False):
+        return _blank("gate_disabled", "momentum_gate.enabled is false")
+
+    try:
+        lookback = int(gate.get("lookback_days", 20))
+        min_pct = float(gate.get("momentum_min_pct", 0.0))
+        uplift = float(gate.get("hard_uplift_pct", 10.0))
+        max_age = MOMENTUM_MAX_STALENESS_DAYS if max_staleness_days is None else int(max_staleness_days)
+    except (TypeError, ValueError) as exc:
+        # A malformed gate config is a config/programming error, not market data.
+        # Fail closed (no uplift) but never silently.
+        diag = _blank(
+            "invalid_gate_config",
+            f"momentum_gate config is not numeric: {exc!r}",
+        )
+        diag["blocking"] = ["invalid_gate_config"]
+        warnings.warn(
+            f"sector momentum uplift disabled for {sector!r}: {diag['detail']}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return diag
+
+    raw_dir = DATA_DIR if data_dir is None else data_dir
+    try:
+        root = Path(raw_dir)
+    except TypeError as exc:
+        # Path-type error: raise loudly, do NOT degrade to "no uplift, no message".
+        raise TypeError(
+            f"sector momentum gate: data_dir must be path-like, got "
+            f"{type(raw_dir).__name__} ({raw_dir!r})"
+        ) from exc
+
+    members = [s for s, sec in SECTOR_MAP.items() if sec == sector]
+    per_member: list[dict] = []
+    returns: list[float] = []
+    blocking: list[str] = []
+
+    for sym in members:
+        path = root / f"nse_{sym}.csv"
+        entry = {
+            "symbol": sym,
+            "path": str(path),
+            "state": "ok",
+            "rows": 0,
+            "window_rows": 0,
+            "date_source": None,
+            "last_date": None,
+            "staleness_days": None,
+            "return_pct": None,
+            "detail": "",
+        }
+        if not path.exists():
+            entry.update(state="missing", detail="no cached CSV for this symbol")
+            blocking.append("missing")
+            per_member.append(entry)
+            continue
+        try:
+            with path.open("r", newline="") as fh:
+                rows = list(csv.DictReader(fh))
+        except (OSError, UnicodeDecodeError, csv.Error) as exc:
+            entry.update(state="unreadable", detail=f"{type(exc).__name__}: {exc}")
+            blocking.append("unreadable")
+            per_member.append(entry)
+            continue
+
+        entry["rows"] = len(rows)
+        if len(rows) < 2:
+            entry.update(state="malformed", detail=f"needs >= 2 rows, found {len(rows)}")
+            blocking.append("malformed")
+            per_member.append(entry)
+            continue
+
+        window = min(lookback + 1, len(rows))
+        entry["window_rows"] = window
+        last_close = _row_close(rows[-1])
+        prev_close = _row_close(rows[-window])
+        if last_close is None or prev_close is None:
+            entry.update(state="malformed", detail="close column missing or unparseable")
+            blocking.append("malformed")
+            per_member.append(entry)
+            continue
+
+        session_date, date_state = _row_date(rows[-1])
+        if date_state == "malformed":
+            entry.update(state="malformed", detail="date column present but unparseable")
+            blocking.append("malformed")
+            per_member.append(entry)
+            continue
+        if date_state == "no_date_column":
+            try:
+                session_date = datetime.fromtimestamp(path.stat().st_mtime).date()
+            except OSError as exc:
+                entry.update(state="unreadable", detail=f"stat failed: {exc}")
+                blocking.append("unreadable")
+                per_member.append(entry)
+                continue
+            entry["date_source"] = "mtime"
+        else:
+            entry["date_source"] = "csv"
+
+        entry["last_date"] = session_date.isoformat()
+        staleness = (resolved_upto - session_date).days
+        entry["staleness_days"] = staleness
+        if staleness < 0:
+            entry.update(state="malformed", detail=f"last session {session_date} is dated in the future")
+            blocking.append("malformed")
+            per_member.append(entry)
+            continue
+        if staleness > max_age:
+            entry.update(
+                state="stale",
+                detail=f"last session {session_date} is {staleness}d old (max {max_age}d)",
+            )
+            blocking.append("stale")
+            per_member.append(entry)
+            continue
+
+        ret_pct = (last_close - prev_close) / prev_close * 100.0
+        entry["return_pct"] = round(ret_pct, 4)
+        per_member.append(entry)
+        returns.append(ret_pct)
+
+    diag = {
+        "sector": sector,
+        "applied": False,
+        "reason": None,
+        "detail": "",
+        "blocking": sorted(set(blocking)),
+        "uplift_pct": uplift,
+        "effective_hard_uplift": 0.0,
+        "lookback_days": lookback,
+        "momentum_min_pct": min_pct,
+        "max_staleness_days": max_age,
+        "avg_return_pct": None,
+        "members": per_member,
+        "evaluated_at": resolved_upto.isoformat(),
+        "data_dir": str(root),
+    }
+
+    if not members:
+        diag.update(reason="no_members", detail=f"no sector members configured for {sector!r}")
+    elif blocking:
+        diag.update(
+            reason="data_unusable",
+            detail="no uplift — unusable price evidence: "
+            + ", ".join(f"{e['symbol']}={e['state']}" for e in per_member if e["state"] != "ok"),
+        )
+    else:
+        avg = sum(returns) / len(returns)
+        diag["avg_return_pct"] = round(avg, 4)
+        if avg >= min_pct:
+            diag.update(
+                applied=True,
+                reason="uplift_applied",
+                effective_hard_uplift=uplift,
+                detail=(
+                    f"{sector} avg {lookback}-session return {avg:.2f}% >= "
+                    f"{min_pct:.2f}% — HARD cap raised by {uplift:.1f}pt"
+                ),
+            )
+        else:
+            diag.update(
+                reason="momentum_below_threshold",
+                detail=(
+                    f"{sector} avg {lookback}-session return {avg:.2f}% < "
+                    f"{min_pct:.2f}% — no uplift"
+                ),
+            )
+
+    if diag["reason"] == "data_unusable":
+        warnings.warn(
+            f"sector momentum uplift disabled for {sector!r}: {diag['detail']}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    return diag
+
+
+def sector_cap(sector: str, *, data_dir=None, now=None, max_staleness_days: Optional[int] = None) -> dict:
     """Return {warn, hard} for a sector, applying the momentum uplift if trending.
 
     Falls back to DEFAULT_CAP (max_sector_exposure_pct) for unknown sectors.
-    The momentum gate raises HARD by `hard_uplift_pct` when the sector's average
-    return over `lookback_days` is >= `momentum_min_pct` (i.e. still trending up),
+    The momentum gate raises HARD by ``hard_uplift_pct`` (exactly once) when the
+    sector's average return over ``lookback_days`` is >= ``momentum_min_pct``,
     so winning sectors are NOT force-trimmed at HARD. Reads price history from
-    data/nse_<SYM>.csv; on any failure, no uplift (conservative).
+    ``<DATA_DIR>/nse_<SYM>.csv``; every member must exist, be readable, be
+    well-formed and be fresh, otherwise no uplift (conservative).
+
+    ``data_dir`` / ``now`` / ``max_staleness_days`` exist for deterministic
+    testing and inspection; production callers use the defaults. Call
+    :func:`sector_momentum_diagnostics` with the same arguments to see why the
+    uplift applied or was withheld.
     """
     caps = EXECUTION_CONFIG.get("sector_caps", {})
     default = float(EXECUTION_CONFIG.get("max_sector_exposure_pct", 25.0))
@@ -435,33 +739,14 @@ def sector_cap(sector: str) -> dict:
     warn = float(base.get("warn", default))
     hard = float(base.get("hard", default))
 
-    gate = EXECUTION_CONFIG.get("momentum_gate", {}) or {}
-    if not gate.get("enabled", False):
-        return {"warn": warn, "hard": hard}
-
-    try:
-        lookback = int(gate.get("lookback_days", 20))
-        min_pct = float(gate.get("momentum_min_pct", 0.0))
-        uplift = float(gate.get("hard_uplift_pct", 10.0))
-        # Sector members from SECTOR_MAP
-        members = [s for s, sec in SECTOR_MAP.items() if sec == sector]
-        rets = []
-        for sym in members:
-            csv_path = DATA_DIR / f"nse_{sym}.csv"
-            if not csv_path.exists():
-                continue
-            import csv
-            rows = list(csv.DictReader(open(csv_path)))
-            if len(rows) < 2:
-                continue
-            last = _num(rows[-1])
-            prev = _num(rows[-min(lookback + 1, len(rows))])
-            if last and prev:
-                rets.append((last - prev) / prev * 100)
-        if rets and (sum(rets) / len(rets)) >= min_pct:
-            hard += uplift
-    except Exception:
-        pass  # conservative: no uplift on any error
+    diag = sector_momentum_diagnostics(
+        sector,
+        data_dir=data_dir,
+        now=now,
+        max_staleness_days=max_staleness_days,
+    )
+    if diag["applied"]:
+        hard += float(diag["effective_hard_uplift"])
     return {"warn": warn, "hard": hard}
 
 

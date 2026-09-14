@@ -38,19 +38,15 @@ class OrderStatus(str, Enum):
     CANCELLED = "CANCELLED"
     REJECTED = "REJECTED"
 
-    # Terminal states — no further transitions allowed.
-    TERMINAL = frozenset({FILLED, REJECTED, CANCELLED})
-
-    # Pending vs done — used by reconciliation and by ``is_open`` helpers.
-    OPEN = frozenset({PENDING, NEW, PARTIALLY_FILLED})
-
     @classmethod
     def is_terminal(cls, status: "OrderStatus") -> bool:
-        return status in cls.TERMINAL
+        """True when ``status`` is one of the terminal lifecycle states."""
+        return is_terminal(status)
 
     @classmethod
     def is_open(cls, status: "OrderStatus") -> bool:
-        return status in cls.OPEN
+        """True when ``status`` is one of the open (in-flight) states."""
+        return is_open(status)
 
     @classmethod
     def legal_next(cls, status: "OrderStatus") -> frozenset["OrderStatus"]:
@@ -58,17 +54,65 @@ class OrderStatus(str, Enum):
         return _TRANSITIONS.get(status, frozenset())
 
 
+# ── Lifecycle classification — MODULE LEVEL, never inside the enum body ──
+# These sets used to live inside ``OrderStatus`` as ``TERMINAL``/``OPEN``
+# frozensets. ``OrderStatus`` is a ``str`` mixin, so Enum collected those
+# non-descriptor class attributes as MEMBERS: ``OrderStatus.OPEN`` became an
+# OrderStatus whose *string value* was "frozenset({...})", and
+# ``status in OrderStatus.OPEN`` fell through to ``str.__contains__`` — a
+# SUBSTRING test. ``"FILLED" in "frozenset({'PARTIALLY_FILLED', ...})"`` is True,
+# so every FILLED order was reported as open (TP-001, verified 2026-09-15).
+#
+# Rule: any collection of statuses belongs here, at module level, as a
+# frozenset of OrderStatus members. Never add a non-literal attribute to the
+# OrderStatus class body.
+OPEN_STATUSES: frozenset["OrderStatus"] = frozenset({
+    OrderStatus.PENDING,
+    OrderStatus.NEW,
+    OrderStatus.PARTIALLY_FILLED,
+})
+
+TERMINAL_STATUSES: frozenset["OrderStatus"] = frozenset({
+    OrderStatus.FILLED,
+    OrderStatus.REJECTED,
+    OrderStatus.CANCELLED,
+})
+
+# Every lifecycle state must be classified exactly once. A future status added
+# without updating the sets above fails loudly at import instead of silently
+# being treated as "not open" (which is how a filled order hid in the open book).
+_ALL_STATUSES: frozenset["OrderStatus"] = frozenset(OrderStatus)
+if (OPEN_STATUSES | TERMINAL_STATUSES) != _ALL_STATUSES:
+    raise RuntimeError(
+        "OrderStatus lifecycle partition is incomplete: "
+        f"unclassified={sorted(s.name for s in _ALL_STATUSES - (OPEN_STATUSES | TERMINAL_STATUSES))}"
+    )
+if OPEN_STATUSES & TERMINAL_STATUSES:
+    raise RuntimeError(
+        "OrderStatus lifecycle partition is not disjoint: "
+        f"overlap={sorted(s.name for s in OPEN_STATUSES & TERMINAL_STATUSES)}"
+    )
+
+
+def _as_status(status) -> OrderStatus:
+    """Coerce a raw string/JSON status to an :class:`OrderStatus` member.
+
+    Call sites often hold a raw string from JSON. An unknown value raises
+    ``ValueError`` (it is a contract/data error, not a lifecycle state) rather
+    than being silently classified as "not open".
+    """
+    if isinstance(status, OrderStatus):
+        return status
+    return OrderStatus(status)
+
+
 # ── Module-level helpers (accept string OR enum) ──
-# Call sites often hold a raw string from JSON; these coerce safely so we
-# never trip ``is_terminal("FILLED")`` returning False (string != enum member).
 def is_terminal(status) -> bool:
-    s = status if isinstance(status, OrderStatus) else OrderStatus(status)
-    return s in OrderStatus.TERMINAL
+    return _as_status(status) in TERMINAL_STATUSES
 
 
 def is_open(status) -> bool:
-    s = status if isinstance(status, OrderStatus) else OrderStatus(status)
-    return s in OrderStatus.OPEN
+    return _as_status(status) in OPEN_STATUSES
 
 
 # Allowed transitions as an adjacency map.

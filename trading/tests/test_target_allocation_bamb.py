@@ -245,6 +245,15 @@ def test_banking_warn_cap_no_hard():
     assert not hard, "banking under hard cap must NOT produce HARD_CAP"
 
 
-def test_tiered_banking_caps_are_canonical():
-    assert config.sector_cap("banking") == {"warn": 40.0, "hard": 45.0}
+def test_tiered_banking_caps_are_canonical(tmp_path):
+    """Base tiered caps are canonical when the momentum gate has no evidence.
+
+    Deterministic by construction: the momentum uplift (TP-002) now reads the
+    live ``data/`` cache, so asserting live caps here would depend on today's
+    prices. The uplift itself is covered in
+    ``test_sector_momentum_cap.py``.
+    """
+    assert config.sector_cap("banking", data_dir=tmp_path) == {"warn": 40.0, "hard": 45.0}
+    assert config.sector_cap("banking")["warn"] == 40.0
+    assert config.sector_cap("banking")["hard"] >= 45.0
 
