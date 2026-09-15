@@ -115,12 +115,31 @@ def test_jul17_freeze_regression_does_not_skip_as_target_met(tmp_path, monkeypat
             return str(portfolio_dir)
         if s.rstrip("/").endswith(".trading/cache"):
             return str(tmp_path / "cache")
+        # TP-009: SafetyEngine reads/writes drawdown + macro-breaker state under
+        # ~/.trading/execution (macro_breaker.json, safety_state.json,
+        # macro_snapshot.json, EMERGENCY_STOP). Redirect EVERY path under that
+        # directory into tmp_path: the live macro_breaker.json persisted a
+        # "broad selloff" trip, which made this test depend on (and mutate)
+        # mutable production state.
+        marker = ".trading/execution"
+        idx = s.find(marker)
+        if idx != -1:
+            return str(tmp_path / "execution") + s[idx + len(marker):]
         if s.rstrip("/").endswith(".trading"):
             return str(tmp_path)
         return s
 
+    (tmp_path / "execution").mkdir(exist_ok=True)
     monkeypatch.delenv("MANSA_API_KEY", raising=False)
     monkeypatch.setattr("trading.auto_trader.os.path.expanduser", _fake_expanduser)
+    # TP-009: run_auto_trade() refreshes the macro circuit breaker from the
+    # LIVE price feed. Feeding it a deterministic empty map keeps the breaker
+    # fail-open (no thresholds evaluated) so this test asserts the
+    # delta-vs-absolute target contract, not today's market breadth.
+    monkeypatch.setattr(
+        "trading.nse_price_fetcher.fetch_prices",
+        lambda *args, **kwargs: {},
+    )
     monkeypatch.setattr(
         "trading.target_allocation.generate_rebalance_plan",
         lambda **kwargs: fake_plan,

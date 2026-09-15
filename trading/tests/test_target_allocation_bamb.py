@@ -64,10 +64,15 @@ def test_bamb_not_in_any_sector_stocks():
     assert "BAMB" in SUSPENDED, "BAMB must be in SUSPENDED sentinel"
 
 
+@pytest.mark.live_data
 def test_held_non_suspended_positions_have_target():
     """CRITICAL: every held position that is NOT suspended must have a
     target weight. This is the guard that catches orphaned real holdings
-    (the bug where EABL was silently dropped and would be force-sold)."""
+    (the bug where EABL was silently dropped and would be force-sold).
+
+    TP-009: read-only invariant over the LIVE book (marked live_data —
+    it reads production state but asserts no historical counts).
+    """
     strat = get_strategy()
     uni = _strategy_universe()
     state_path = ROOT / "portfolio" / "state.json"
@@ -94,12 +99,104 @@ def test_eabl_has_target_weight():
         f"EABL target {strat[eabl_sectors[0]]['target_pct']}, expected ~6.50"
 
 
+def _fixture_state_with_bamb():
+    """Hand-built book containing the suspended BAMB legacy holding (39 sh).
+
+    TP-009: the live book legitimately no longer holds BAMB (the position was
+    closed historically), so the *invariant* — suspended names are never
+    force-sold and stay reported with current_value > 0 IF present — must be
+    tested against a fixture rather than mutable production state.
+    """
+    positions = [
+        {"symbol": "BAMB", "shares": 39, "avg_cost": 54.0,
+         "total_cost": 2106.0, "current_value": 2106.0},
+        {"symbol": "KCB", "shares": 135, "avg_cost": 92.25,
+         "total_cost": 12453.75, "current_value": 12453.75},
+        {"symbol": "EABL", "shares": 18, "avg_cost": 286.0,
+         "total_cost": 5148.0, "current_value": 5148.0},
+        {"symbol": "SCOM", "shares": 402, "avg_cost": 35.85,
+         "total_cost": 14411.7, "current_value": 14411.7},
+    ]
+    cash = 60000.0
+    return {
+        "cash": cash,
+        "initial_capital": 100000.0,
+        "max_drawdown_pct": 0.0,
+        "positions": positions,
+        "total_value": cash + sum(p["current_value"] for p in positions),
+    }
+
+
 def test_bamb_never_in_rebalance_trades():
-    """Generate a plan against the live portfolio and assert no BAMB trade."""
+    """A fixture book holding BAMB must never produce a BAMB trade."""
+    state = _fixture_state_with_bamb()
+    prices = {p["symbol"]: p["current_value"] / p["shares"] for p in state["positions"]}
+
+    plan = generate_rebalance_plan(
+        signals=[{"symbol": s, "score": 50} for s in prices],
+        prices=prices,
+        portfolio=state,
+        dry_run=True,
+    )
+    trades = plan.get("trades", [])
+    bamb_trades = [t for t in trades if t.get("symbol") == "BAMB"]
+    assert not bamb_trades, f"BAMB appeared in rebalance trades: {bamb_trades}"
+
+
+def test_suspended_bamb_retained_and_never_force_sold(tmp_path, monkeypatch):
+    """A fixture state.json holding BAMB: 39 shares survive, value reported.
+
+    The invariant that matters is "suspended names are never force-sold and
+    remain reported with current_value > 0 IF present" — not that the live
+    book currently holds BAMB (it may legitimately not).
+    """
+    import trading.target_allocation as ta
+
+    state = _fixture_state_with_bamb()
+    pdir = tmp_path / "portfolio"
+    pdir.mkdir()
+    state_file = pdir / "state.json"
+    state_file.write_text(json.dumps(state))
+    monkeypatch.setattr(ta, "STATE_PATH", state_file)
+    monkeypatch.setattr(ta, "MTM_PATH", tmp_path / "no_mtm_state.json")
+
+    loaded = ta._load_portfolio()
+    bamb = next((p for p in loaded.get("positions", []) if p["symbol"] == "BAMB"), None)
+    assert bamb is not None, "suspended holding must survive the state read"
+    assert int(bamb.get("shares", 0)) == 39, f"expected 39 BAMB shares, got {bamb.get('shares')}"
+    assert float(bamb.get("current_value", 0)) > 0, "BAMB current_value must be reported"
+
+    weights = ta.compute_sector_weights(loaded)
+    reported = {s for sec in weights["sectors"].values() for s in sec["stocks"]}
+    assert "BAMB" in reported, "suspended holding was dropped from reported sector weights"
+    assert weights["total_value"] == pytest.approx(state["total_value"])
+
+    prices = {p["symbol"]: p["current_value"] / p["shares"] for p in loaded["positions"]}
+    plan = ta.generate_rebalance_plan(
+        signals=[{"symbol": s, "score": 50} for s in prices],
+        prices=prices,
+        portfolio=loaded,
+        dry_run=True,
+    )
+    bamb_trades = [t for t in plan.get("trades", []) if t.get("symbol") == "BAMB"]
+    assert not bamb_trades, f"suspended BAMB must never be force-sold, got: {bamb_trades}"
+
+
+@pytest.mark.live_data
+def test_live_book_never_force_sells_suspended_holdings():
+    """Read-only invariant smoke over the LIVE book (no historical counts).
+
+    Whatever the live portfolio holds today, any SUSPENDED symbol in it must
+    receive no BUY/SELL from a generated plan. Marked ``live_data`` so it can
+    be deselected with ``-m "not live_data"``.
+    """
     state_path = ROOT / "portfolio" / "state.json"
     if not state_path.exists():
         pytest.skip("no live portfolio state.json to test against")
     state = json.loads(state_path.read_text())
+    held_suspended = [p["symbol"] for p in state.get("positions", [])
+                      if p["symbol"] in SUSPENDED]
+
     prices = {p["symbol"]: p.get("current_value", 0) / max(p.get("shares", 1), 1)
               for p in state.get("positions", [])}
     # Floor any zero price so the engine doesn't bail on missing data
@@ -113,20 +210,10 @@ def test_bamb_never_in_rebalance_trades():
         dry_run=True,
     )
     trades = plan.get("trades", [])
-    bamb_trades = [t for t in trades if t.get("symbol") == "BAMB"]
-    assert not bamb_trades, f"BAMB appeared in rebalance trades: {bamb_trades}"
-
-
-def test_held_bamb_shares_retained():
-    """39 BAMB shares must remain in state.json current_value (no forced sale)."""
-    state_path = ROOT / "portfolio" / "state.json"
-    if not state_path.exists():
-        pytest.skip("no live portfolio state.json")
-    state = json.loads(state_path.read_text())
-    bamb = next((p for p in state.get("positions", []) if p["symbol"] == "BAMB"), None)
-    assert bamb is not None, "BAMB position dropped from portfolio state"
-    assert int(bamb.get("shares", 0)) == 39, f"expected 39 BAMB shares, got {bamb.get('shares')}"
-    assert float(bamb.get("current_value", 0)) > 0, "BAMB current_value must be reported"
+    for sym in held_suspended:
+        bad = [t for t in trades if t.get("symbol") == sym]
+        assert not bad, f"suspended holding {sym} received a trade: {bad}"
+    assert not [t for t in trades if t.get("symbol") in SUSPENDED]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
