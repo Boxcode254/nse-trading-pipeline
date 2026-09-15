@@ -15,6 +15,15 @@ TP-005 (2026-09-15) changes:
     as a fixed string;
   * hardcoded historical claims (fix dates, "last run today") are gone.
 
+TP-008 (2026-09-15) changes:
+  * the integrity section reads the CURRENT status record
+    (``portfolio/integrity_status.json``, maintained by
+    ``scripts/book_integrity_check.py``) instead of the tail of the
+    append-only incident log;
+  * it distinguishes current status (with its own computed age) from the
+    "last recorded failure" (also with a computed age) and prints no
+    historical failure as if it were current.
+
 ``build_report()`` returns the message text without side effects so the logic
 can be exercised read-only in tests/smokes; ``main()`` persists the copy and
 sends it.
@@ -45,6 +54,7 @@ except Exception:  # noqa: BLE001
     pass
 
 from trading.services import benchmark_compare as bc  # noqa: E402
+from trading.services import integrity_status as istat  # noqa: E402
 from trading.services import portfolio_status as ps  # noqa: E402
 
 BASE = Path.home() / ".trading"
@@ -56,6 +66,17 @@ INIT_CAPITAL = 100000.0
 def load(p):
     with open(p) as f:
         return json.load(f)
+
+
+def integrity_lines(pf_dir, now=None):
+    """Current book-integrity status (TP-008).
+
+    Reads the CURRENT status record (``portfolio/integrity_status.json``,
+    written by every scheduled ``book_integrity_check.py`` run) — never the
+    tail of the append-only incident log, which is history. Ages are computed
+    from the record's stamps; no date or staleness string is hardcoded here.
+    """
+    return istat.format_report_lines(istat.load(pf_dir), now=now)
 
 
 def _grab_section(txt, header):
@@ -108,12 +129,8 @@ def build_report() -> tuple[str, dict]:
     sig_dates = Counter(x[0][:10] for x in sig_rows)
     sig_recent = dict(sorted(sig_dates.items())[-4:])
 
-    # ---- Integrity ----
-    integrity = []
-    bi_path = PF / "book_integrity.log"
-    if bi_path.exists():
-        lines = [line.strip() for line in bi_path.read_text().splitlines() if line.strip()]
-        integrity = lines[-2:] if len(lines) >= 2 else lines
+    # ---- Integrity (current status record, NOT the incident-log tail) ----
+    integrity = integrity_lines(PF)
 
     # ---- Morning brief (latest) ----
     briefs = sorted(glob.glob(str(LOG / "morning-*.md")))
@@ -307,13 +324,18 @@ def build_report() -> tuple[str, dict]:
     L.append(
         "_Sources: portfolio/mtm_state.json (via trading.services.portfolio_status), "
         "portfolio/benchmark.json (via trading.services.benchmark_compare), signals.csv, "
-        "portfolio/book_integrity.log, audit/fundamental_audit.json, logs/morning-*.md._"
+        "portfolio/integrity_status.json, audit/fundamental_audit.json, logs/morning-*.md._"
     )
 
+    integrity_record = istat.load(PF)
     meta = {
         "portfolio_value": total_value,
         "portfolio_as_of": gen_at,
         "portfolio_age_days": pf_age,
+        "integrity_status": (integrity_record or {}).get("status"),
+        "integrity_checked_at": (integrity_record or {}).get("checked_at"),
+        "integrity_age_days": istat.age_days((integrity_record or {}).get("checked_at")),
+        "last_recorded_failure": (integrity_record or {}).get("last_failure"),
         "comparison_status": comparison.get("comparison_status"),
         "comparison_reason_codes": comparison.get("reason_codes"),
         "benchmark_age_days": comparison.get("benchmark_age_days"),

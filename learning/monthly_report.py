@@ -25,6 +25,26 @@ sys.path.insert(0, str(Path(__file__).parent))
 from db import LearningDB, get_db
 
 
+#: TP-006: no positive (or negative) performance conclusion is published below
+#: this many CLOSED, evaluated outcomes. Mirrors
+#: ``trading.services.stats.MIN_EVALUATED_OUTCOMES`` — both are 30 by contract.
+MIN_CLOSED_OUTCOMES = 30
+
+
+def _coverage_pct(evaluated: int, total: int) -> float:
+    """Evaluated share of all recommendations, in percent."""
+    return round(100.0 * evaluated / total, 2) if total else 0.0
+
+
+def _insufficient_sample_note(evaluated: int, total: int) -> str:
+    """The exact 'insufficient_sample' marker + its raw counts."""
+    return "insufficient_sample (evaluated=%d of %d recommendations, %.2f%% coverage)" % (
+        evaluated,
+        total,
+        _coverage_pct(evaluated, total),
+    )
+
+
 def generate_monthly_report(
     db: LearningDB,
     months_back: int = 1,
@@ -46,6 +66,14 @@ def generate_monthly_report(
     # Current month identifier
     current_month = datetime.now().strftime("%Y-%m")
     
+    # TP-006: outcome sample gate. Nothing below MIN_CLOSED_OUTCOMES closed
+    # outcomes supports a performance statement — say so instead of claiming.
+    evaluated = int(overall_stats.get('evaluated_outcomes') or 0)
+    total_recs = int(overall_stats.get('total_recommendations') or 0)
+    successful = int(overall_stats.get('successful_outcomes') or 0)
+    coverage = _coverage_pct(evaluated, total_recs)
+    sample_sufficient = evaluated >= MIN_CLOSED_OUTCOMES
+    
     lines = [
         "# Monthly Trading Performance Report",
         "",
@@ -56,14 +84,28 @@ def generate_monthly_report(
         "",
         "## Executive Summary",
         "",
-        f"**Total Recommendations:** {overall_stats['total_recommendations']}",
-        f"**Evaluated Outcomes:** {overall_stats['evaluated_outcomes']}",
-        f"**Success Rate:** {overall_stats['success_rate_pct']:.1f}%",
-        f"**Avg Actual Return:** {overall_stats['avg_actual_return']:.2f}%" if overall_stats['avg_actual_return'] else "**Avg Actual Return:** —",
-        f"**Avg Expected Return:** {overall_stats['avg_expected_return']:.2f}%" if overall_stats['avg_expected_return'] else "**Avg Expected Return:** —",
-        f"**Avg Time to Target:** {overall_stats['avg_time_to_target_days']:.1f} days" if overall_stats['avg_time_to_target_days'] else "**Avg Time to Target:** —",
-        "",
+        f"**Total Recommendations:** {total_recs}",
+        f"**Evaluated Outcomes:** {evaluated}",
+        f"**Evaluated Coverage:** {coverage:.2f}% ({evaluated} of {total_recs} recommendations)",
     ]
+    if sample_sufficient:
+        lines.append(
+            f"**Success Rate:** {overall_stats['success_rate_pct']:.1f}% "
+            f"({successful}/{evaluated} evaluated)"
+        )
+        if overall_stats['avg_actual_return']:
+            lines.append(f"**Avg Actual Return:** {overall_stats['avg_actual_return']:.2f}%")
+        if overall_stats['avg_expected_return']:
+            lines.append(f"**Avg Expected Return:** {overall_stats['avg_expected_return']:.2f}%")
+        if overall_stats['avg_time_to_target_days']:
+            lines.append(f"**Avg Time to Target:** {overall_stats['avg_time_to_target_days']:.1f} days")
+    else:
+        lines.append(f"**Performance:** {_insufficient_sample_note(evaluated, total_recs)}")
+        lines.append(
+            f"**Sample caveat:** fewer than {MIN_CLOSED_OUTCOMES} closed eligible outcomes — "
+            f"no performance conclusion is drawn in this report."
+        )
+    lines.append("")
     
     # Signal breakdown
     lines.extend([
@@ -87,7 +129,15 @@ def generate_monthly_report(
         ])
         
         for m in monthly_stats:
-            success_pct = f"{m.success_rate_pct:.1f}%" if m.success_rate_pct is not None else "—"
+            m_eval = m.evaluated_outcomes or 0
+            if m_eval == 0:
+                success_pct = "—"
+            elif not sample_sufficient:
+                # The OVERALL sample is below the threshold, so no rate is
+                # publishable anywhere in this report — raw counts only.
+                success_pct = "insufficient_sample (n=%d)" % m_eval
+            else:
+                success_pct = "%.1f%% (n=%d)" % (m.success_rate_pct or 0.0, m_eval)
             actual_ret = f"{m.avg_actual_return:.2f}%" if m.avg_actual_return is not None else "—"
             expected_ret = f"{m.avg_expected_return:.2f}%" if m.avg_expected_return is not None else "—"
             time_target = f"{m.avg_time_to_target_days:.1f}" if m.avg_time_to_target_days is not None else "—"
@@ -111,31 +161,44 @@ def generate_monthly_report(
         "## ✅ What Worked",
         "",
     ])
-    
-    if overall_stats['success_rate_pct'] >= 60:
-        lines.append(f"- **Overall success rate of {overall_stats['success_rate_pct']:.1f}%** — The system is producing profitable signals more often than not.")
-    else:
-        lines.append(f"- **Success rate of {overall_stats['success_rate_pct']:.1f}%** — Room for improvement, but signals are being tracked.")
-    
-    if overall_stats['avg_actual_return'] and overall_stats['avg_actual_return'] > 0:
-        lines.append(f"- **Positive average return ({overall_stats['avg_actual_return']:.2f}%)** — Winning trades are outweighing losses.")
-    
-    # High-confidence winners
+
+    # High-confidence signals (counts; not a performance claim)
     high_conf_recs = db.get_recommendations(recommendation="BUY", limit=100)
     high_conf_winners = [
-        r for r in high_conf_recs 
+        r for r in high_conf_recs
         if r.confidence >= 0.7
     ]
-    if high_conf_winners:
-        lines.append(f"- **{len(high_conf_winners)} high-confidence BUY signals** — Strong conviction signals are being generated.")
-    
-    # Fast time to target
-    if overall_stats['avg_time_to_target_days'] and overall_stats['avg_time_to_target_days'] <= 14:
-        lines.append(f"- **Fast execution ({overall_stats['avg_time_to_target_days']:.1f} avg days to target)** — Targets reached quickly.")
-    
-    if not high_conf_winners and (not overall_stats['avg_actual_return'] or overall_stats['avg_actual_return'] <= 0):
-        lines.append("- *No clear winning patterns identified this period.*")
-    
+
+    if not sample_sufficient:
+        lines.append(
+            "- *%s — no performance conclusion is drawn below %d closed eligible outcomes.*"
+            % (_insufficient_sample_note(evaluated, total_recs), MIN_CLOSED_OUTCOMES)
+        )
+        lines.append(
+            "- Raw counts only: %d recommendation(s) on file, %d BUY / %d SELL / %d HOLD, "
+            "%d high-confidence BUY (confidence >= 0.70)."
+            % (total_recs, overall_stats['buy_count'], overall_stats['sell_count'],
+               overall_stats['hold_count'], len(high_conf_winners))
+        )
+    else:
+        if overall_stats['success_rate_pct'] >= 60:
+            lines.append(f"- **Overall success rate of {overall_stats['success_rate_pct']:.1f}%** ({successful}/{evaluated} evaluated outcomes) — the system is producing profitable signals more often than not.")
+        else:
+            lines.append(f"- **Success rate of {overall_stats['success_rate_pct']:.1f}%** ({successful}/{evaluated} evaluated outcomes) — room for improvement, but signals are being tracked.")
+
+        if overall_stats['avg_actual_return'] and overall_stats['avg_actual_return'] > 0:
+            lines.append(f"- **Positive average return ({overall_stats['avg_actual_return']:.2f}%)** — Winning trades are outweighing losses.")
+
+        if high_conf_winners:
+            lines.append(f"- **{len(high_conf_winners)} high-confidence BUY signals** — Strong conviction signals are being generated.")
+
+        # Fast time to target
+        if overall_stats['avg_time_to_target_days'] and overall_stats['avg_time_to_target_days'] <= 14:
+            lines.append(f"- **Fast execution ({overall_stats['avg_time_to_target_days']:.1f} avg days to target)** — Targets reached quickly.")
+
+        if not high_conf_winners and (not overall_stats['avg_actual_return'] or overall_stats['avg_actual_return'] <= 0):
+            lines.append("- *No clear winning patterns identified this period.*")
+
     lines.append("")
     
     # What Failed
@@ -143,31 +206,41 @@ def generate_monthly_report(
         "## ❌ What Failed",
         "",
     ])
-    
-    if overall_stats['success_rate_pct'] < 50:
-        lines.append(f"- **Low success rate ({overall_stats['success_rate_pct']:.1f}%)** — More than half of evaluated trades didn't hit target.")
-    
-    if overall_stats['avg_actual_return'] and overall_stats['avg_actual_return'] < 0:
-        lines.append(f"- **Negative average return ({overall_stats['avg_actual_return']:.2f}%)** — Losses exceeded gains.")
-    
-    # Failed by recommendation type
-    if overall_stats['sell_count'] > 0:
-        sell_outcomes = db.get_outcomes()
-        sell_failures = [o for o in sell_outcomes if not o.success and db.get_recommendation(o.symbol, o.date) and db.get_recommendation(o.symbol, o.date).recommendation == "SELL"]
-        if sell_failures:
-            lines.append(f"- **{len(sell_failures)} failed SELL signals** — Short/bearish calls not working.")
-    
+
+    low_conf_recs = [r for r in db.get_recommendations(limit=1000) if r.confidence < 0.4]
+
+    if not sample_sufficient:
+        lines.append(
+            "- *%s — no failure-rate conclusion is drawn below %d closed eligible outcomes.*"
+            % (_insufficient_sample_note(evaluated, total_recs), MIN_CLOSED_OUTCOMES)
+        )
+        lines.append(
+            "- Raw counts only: %d low-confidence signal(s) (confidence < 0.40) on file."
+            % len(low_conf_recs)
+        )
+    else:
+        if overall_stats['success_rate_pct'] < 50:
+            lines.append(f"- **Low success rate ({overall_stats['success_rate_pct']:.1f}%; {successful}/{evaluated} evaluated)** — More than half of evaluated trades didn't hit target.")
+
+        if overall_stats['avg_actual_return'] and overall_stats['avg_actual_return'] < 0:
+            lines.append(f"- **Negative average return ({overall_stats['avg_actual_return']:.2f}%)** — Losses exceeded gains.")
+
+        # Failed by recommendation type
+        if overall_stats['sell_count'] > 0:
+            sell_outcomes = db.get_outcomes()
+            sell_failures = [o for o in sell_outcomes if not o.success and db.get_recommendation(o.symbol, o.date) and db.get_recommendation(o.symbol, o.date).recommendation == "SELL"]
+            if sell_failures:
+                lines.append(f"- **{len(sell_failures)} failed SELL signals** — Short/bearish calls not working.")
+
+        if low_conf_recs:
+            lines.append(f"- **{len(low_conf_recs)} low-confidence signals** — Noise may be diluting performance.")
+
+        if overall_stats['success_rate_pct'] >= 50 and (not overall_stats['avg_actual_return'] or overall_stats['avg_actual_return'] >= 0):
+            lines.append("- *No major failure patterns identified this period.*")
+
     if overall_stats['hold_count'] > overall_stats['buy_count'] + overall_stats['sell_count']:
         lines.append(f"- **High HOLD ratio ({overall_stats['hold_count']} vs {overall_stats['buy_count'] + overall_stats['sell_count']} actionable)** — System may be too conservative.")
-    
-    # Low confidence signals
-    low_conf_recs = [r for r in db.get_recommendations(limit=1000) if r.confidence < 0.4]
-    if low_conf_recs:
-        lines.append(f"- **{len(low_conf_recs)} low-confidence signals** — Noise may be diluting performance.")
-    
-    if overall_stats['success_rate_pct'] >= 50 and (not overall_stats['avg_actual_return'] or overall_stats['avg_actual_return'] >= 0):
-        lines.append("- *No major failure patterns identified this period.*")
-    
+
     lines.append("")
     
     # Strategies Improving
@@ -181,33 +254,43 @@ def generate_monthly_report(
         current = monthly_stats[0]
         previous = monthly_stats[1]
         
-        success_delta = current.success_rate_pct - (previous.success_rate_pct or 0)
-        return_delta = (current.avg_actual_return or 0) - (previous.avg_actual_return or 0)
         volume_delta = current.total_recommendations - previous.total_recommendations
-        
-        prev_success = previous.success_rate_pct if previous.success_rate_pct is not None else 0
-        curr_success = current.success_rate_pct if current.success_rate_pct is not None else 0
-        
-        if success_delta > 5:
-            lines.append(f"- **Success rate improved by {success_delta:.1f}pp** ({prev_success:.1f}% → {curr_success:.1f}%)")
-        elif success_delta > 0:
-            lines.append(f"- **Success rate trending up** (+{success_delta:.1f}pp month-over-month)")
-        
-        if return_delta > 0:
-            lines.append(f"- **Average returns improving** ({(previous.avg_actual_return or 0):.2f}% → {(current.avg_actual_return or 0):.2f}%)")
-        
         if volume_delta > 0:
             lines.append(f"- **Signal volume increasing** ({previous.total_recommendations} → {current.total_recommendations} recommendations)")
-        
-        # Confidence improvement
-        conf_delta = current.avg_confidence - (previous.avg_confidence or 0)
-        if conf_delta > 0.05:
-            lines.append(f"- **Signal confidence rising** ({previous.avg_confidence:.2f} → {current.avg_confidence:.2f})")
+
+        curr_eval = current.evaluated_outcomes or 0
+        prev_eval = previous.evaluated_outcomes or 0
+        if sample_sufficient and curr_eval >= MIN_CLOSED_OUTCOMES and prev_eval >= MIN_CLOSED_OUTCOMES:
+            success_delta = current.success_rate_pct - (previous.success_rate_pct or 0)
+            return_delta = (current.avg_actual_return or 0) - (previous.avg_actual_return or 0)
+            prev_success = previous.success_rate_pct if previous.success_rate_pct is not None else 0
+            curr_success = current.success_rate_pct if current.success_rate_pct is not None else 0
+
+            if success_delta > 5:
+                lines.append(f"- **Success rate improved by {success_delta:.1f}pp** ({prev_success:.1f}% → {curr_success:.1f}%)")
+            elif success_delta > 0:
+                lines.append(f"- **Success rate trending up** (+{success_delta:.1f}pp month-over-month)")
+
+            if return_delta > 0:
+                lines.append(f"- **Average returns improving** ({(previous.avg_actual_return or 0):.2f}% → {(current.avg_actual_return or 0):.2f}%)")
+
+            # Confidence improvement
+            conf_delta = current.avg_confidence - (previous.avg_confidence or 0)
+            if conf_delta > 0.05:
+                lines.append(f"- **Signal confidence rising** ({previous.avg_confidence:.2f} → {current.avg_confidence:.2f})")
+        else:
+            lines.append(
+                "- *Month-over-month performance is not assessed: the latest two months "
+                "carry %d and %d evaluated outcome(s), and %d closed outcomes per month "
+                "are required before a rate is published.*"
+                % (curr_eval, prev_eval, MIN_CLOSED_OUTCOMES)
+            )
     else:
         lines.append("- *Insufficient history for month-over-month comparison (need 2+ months of data)*")
     
     # Symbol-level improvement
-    if include_details:
+    improving_symbols = []
+    if include_details and sample_sufficient:
         symbols = set()
         for m in monthly_stats:
             # Get symbols from recommendations
@@ -215,10 +298,9 @@ def generate_monthly_report(
             for r in recs:
                 symbols.add(r.symbol)
         
-        improving_symbols = []
         for sym in symbols:
             perf = db.get_symbol_performance(sym)
-            if perf['evaluated'] >= 3 and perf['success_rate_pct'] >= 60:
+            if perf['evaluated'] >= MIN_CLOSED_OUTCOMES and perf['success_rate_pct'] >= 60:
                 improving_symbols.append((sym, perf['success_rate_pct'], perf['avg_return'], perf['evaluated']))
         
         if improving_symbols:
@@ -230,7 +312,12 @@ def generate_monthly_report(
             for sym, rate, ret, eval_count in sorted(improving_symbols, key=lambda x: x[1], reverse=True)[:10]:
                 lines.append(f"| {sym} | {rate:.1f}% | {ret:.2f}% | {eval_count} |")
     
-    if not improving_symbols and len(monthly_stats) < 2:
+    if not sample_sufficient:
+        lines.append(
+            "- *%s — per-symbol performance ranking is suppressed below %d closed outcomes.*"
+            % (_insufficient_sample_note(evaluated, total_recs), MIN_CLOSED_OUTCOMES)
+        )
+    elif not improving_symbols and len(monthly_stats) < 2:
         lines.append("- *No clear improving strategies yet — need more data*")
     
     lines.append("")
@@ -244,25 +331,39 @@ def generate_monthly_report(
     if len(monthly_stats) >= 2:
         current = monthly_stats[0]
         previous = monthly_stats[1]
-        
-        success_delta = current.success_rate_pct - (previous.success_rate_pct or 0)
-        return_delta = (current.avg_actual_return or 0) - (previous.avg_actual_return or 0)
-        
-        if success_delta < -10:
-            lines.append(f"- **Success rate declining sharply ({success_delta:+.1f}pp)** — Current approach degrading.")
-        elif success_delta < -5:
-            lines.append(f"- **Success rate declining ({success_delta:+.1f}pp)** — Review signal filters.")
-        
-        if return_delta < -2:
-            lines.append(f"- **Returns deteriorating ({return_delta:+.2f}pp)** — Risk/reward shifting unfavorably.")
-        
-        if current.avg_confidence < previous.avg_confidence - 0.1:
-            lines.append(f"- **Confidence dropping ({previous.avg_confidence:.2f} → {current.avg_confidence:.2f})** — Signal quality degrading.")
+        curr_eval = current.evaluated_outcomes or 0
+        prev_eval = previous.evaluated_outcomes or 0
+
+        if sample_sufficient and curr_eval >= MIN_CLOSED_OUTCOMES and prev_eval >= MIN_CLOSED_OUTCOMES:
+            success_delta = current.success_rate_pct - (previous.success_rate_pct or 0)
+            return_delta = (current.avg_actual_return or 0) - (previous.avg_actual_return or 0)
+
+            if success_delta < -10:
+                lines.append(f"- **Success rate declining sharply ({success_delta:+.1f}pp)** — Current approach degrading.")
+            elif success_delta < -5:
+                lines.append(f"- **Success rate declining ({success_delta:+.1f}pp)** — Review signal filters.")
+
+            if return_delta < -2:
+                lines.append(f"- **Returns deteriorating ({return_delta:+.2f}pp)** — Risk/reward shifting unfavorably.")
+
+            if current.avg_confidence < previous.avg_confidence - 0.1:
+                lines.append(f"- **Confidence dropping ({previous.avg_confidence:.2f} → {current.avg_confidence:.2f})** — Signal quality degrading.")
+        else:
+            lines.append(
+                "- *Month-over-month decline is not assessed below %d closed outcomes "
+                "per month (latest two months: %d and %d evaluated).*"
+                % (MIN_CLOSED_OUTCOMES, curr_eval, prev_eval)
+            )
     else:
         lines.append("- *Insufficient history for decline detection*")
     
     # Per-symbol retirement candidates
-    if include_details:
+    if include_details and not sample_sufficient:
+        lines.append(
+            "- *%s — retirement candidates are not named below %d closed outcomes.*"
+            % (_insufficient_sample_note(evaluated, total_recs), MIN_CLOSED_OUTCOMES)
+        )
+    elif include_details:
         all_recs = db.get_recommendations(limit=1000)
         symbol_perf = {}
         for r in all_recs:
@@ -271,7 +372,7 @@ def generate_monthly_report(
         
         retirement_candidates = []
         for sym, perf in symbol_perf.items():
-            if perf['evaluated'] >= 5 and perf['success_rate_pct'] < 30:
+            if perf['evaluated'] >= MIN_CLOSED_OUTCOMES and perf['success_rate_pct'] < 30:
                 retirement_candidates.append((sym, perf['success_rate_pct'], perf['avg_return'], perf['evaluated']))
         
         if retirement_candidates:
@@ -284,7 +385,10 @@ def generate_monthly_report(
                 action = "Retire" if rate < 20 else "Review"
                 lines.append(f"| {sym} | {rate:.1f}% | {ret:.2f}% | {eval_count} | {action} |")
         else:
-            lines.append("- *No symbols meet retirement criteria (need 5+ evaluated, <30% success)*")
+            lines.append(
+                "- *No symbols meet retirement criteria (need %d+ evaluated, <30%% success)*"
+                % MIN_CLOSED_OUTCOMES
+            )
     
     lines.append("")
     lines.append("---")
@@ -370,11 +474,23 @@ def main(
         report = generate_monthly_report(db, months_back=months)
         
         if as_json:
-            # Output JSON with report content
+            # Output JSON with report content + the sample gate in machine form
+            stats = db.get_overall_stats()
+            evaluated = int(stats.get("evaluated_outcomes") or 0)
+            total = int(stats.get("total_recommendations") or 0)
+            coverage = _coverage_pct(evaluated, total)
+            sufficient = evaluated >= MIN_CLOSED_OUTCOMES
             result = {
                 "report": report,
                 "month": datetime.now().strftime("%Y-%m"),
                 "generated_at": datetime.now().isoformat(),
+                "sample_status": "sufficient" if sufficient else "insufficient_sample",
+                "evaluated_outcomes": evaluated,
+                "total_recommendations": total,
+                "coverage_pct": coverage,
+                "min_closed_outcomes": MIN_CLOSED_OUTCOMES,
+                "success_rate_pct": round(stats["success_rate_pct"], 2) if sufficient else None,
+                "note": None if sufficient else _insufficient_sample_note(evaluated, total),
             }
             print(json.dumps(result, indent=2))
         else:

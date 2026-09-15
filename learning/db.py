@@ -439,7 +439,7 @@ class LearningDB:
                     ON outcomes(success);
                 CREATE VIEW IF NOT EXISTS monthly_stats AS
                 SELECT
-                    strftime('%%Y-%%m', r.date) AS month,
+                    strftime('%Y-%m', r.date) AS month,
                     COUNT(DISTINCT r.symbol) AS unique_symbols,
                     COUNT(r.id) AS total_recommendations,
                     SUM(CASE WHEN r.recommendation = 'BUY' THEN 1 ELSE 0 END) AS buy_count,
@@ -456,7 +456,7 @@ class LearningDB:
                     AVG(o.time_to_target) AS avg_time_to_target_days
                 FROM recommendations r
                 LEFT JOIN outcomes o ON r.symbol = o.symbol AND r.date = o.date
-                GROUP BY strftime('%%Y-%%m', r.date);
+                GROUP BY strftime('%Y-%m', r.date);
                 CREATE TABLE IF NOT EXISTS decisions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp TEXT NOT NULL,
