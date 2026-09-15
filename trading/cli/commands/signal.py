@@ -23,6 +23,21 @@ def run(symbol: str, quiet: bool = False, as_json: bool = False, verbose: bool =
     """
     result = signal_svc.signal_for_symbol(symbol)
 
+    # ── Non-tradable (suspended/halted/locked) short-circuit ─────────
+    # No ranking pass, no advisor narrative, no score/forecast/action.
+    if result.get("tradable") is False:
+        message = result.get("message", f"{symbol} is not tradeable.")
+        if as_json:
+            print(output.json_dumps(result))
+        else:
+            print(f"⛔  {result.get('symbol', symbol)}  NOT TRADABLE ({result.get('reason')})")
+            print(f"   {message}")
+        if output_path:
+            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+            with open(output_path, "w") as f:
+                f.write(message + "\n")
+        return 0
+
     # Pull the ranking + pair signal once so both the JSON and the
     # console paths can hand a fully-populated context to the advisor.
     from ...services import ranking as ranking_svc

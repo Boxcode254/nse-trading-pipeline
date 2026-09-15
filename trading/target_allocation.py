@@ -168,7 +168,13 @@ STRATEGY: dict[str, dict[str, Any]] = {
 # Group 96.54% buyout + CMA compulsory squeeze-out, heading to delisting.
 # MUST never be a rebalance candidate (buy/sell). Held 39 shares are kept
 # as a static, non-rebalanceable position in portfolio state only.
-SUSPENDED = {"BAMB"}
+#
+# Single source of truth: derived from config.SUSPENDED_SYMBOLS via
+# trading.tradability (TP-003). Do not hard-code a separate list here —
+# a second list is how a suspended counter stays investable somewhere else.
+from trading import tradability as _tradability
+
+SUSPENDED: set[str] = set(_tradability.suspended_symbols())
 
 # ── Execution Constraints ──────────────────────────────────────────────────
 MAX_DAILY_SHIFT_PCT = 5.0   # Max % of portfolio value to shift per day
@@ -966,28 +972,38 @@ def generate_rebalance_plan(
     }
 
 
-# ── Engine agreement gate ──────────────────────────────────────────────────
+# ── Engine CONTRACT-CONSISTENCY check ──────────────────────────────────────
+#
+# NOTE (TP-007): this is NOT independent model agreement. When ``nse_only``
+# is True the Decision Engine *sources* its equity targets from this module
+# (``get_target_allocations``), so a match is structural by construction —
+# it proves the two surfaces share one contract, not that two independent
+# models agree. The presentation and payload say so explicitly.
+CONTRACT_CHECK_LABEL = "Contract-consistency check (structural, not independent agreement)"
 
 def verify_target_agreement(
     nse_only: bool = True,
     tolerance: float = 3.0,
     portfolio: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
-    """Reconcile ``generate_rebalance_plan`` targets vs ``decision`` engine.
+    """Check that the two target surfaces share ONE contract.
 
     The auto-trader executes ``generate_rebalance_plan`` (sector weights that
     sum to 90% equities + 10% cash). The Decision Engine
     (``services.decision.generate_proposal``) is a separate holistic allocator.
-    This gate checks the two agree on per-stock equity targets.
+    This check verifies the two expose the same per-stock equity targets.
 
     When ``nse_only`` is True the Decision Engine sources its equity targets
-    from ``get_target_allocations()`` (single source of truth), so agreement
-    is structural and ``agreed`` should be True. When False, the Decision
-    Engine uses its generic score-weighted distributor (multi-asset buckets),
-    so a divergence is expected and reported rather than asserted.
+    from ``get_target_allocations()`` (single source of truth), so a match is
+    STRUCTURAL — it is a contract-consistency check, not evidence of
+    independent model agreement. When False, the Decision Engine uses its
+    generic score-weighted distributor (multi-asset buckets), so a divergence
+    is expected and reported rather than asserted.
 
     Returns a well-formed report dict:
-        {agreed: bool, max_abs_diff: float, tolerance: float,
+        {agreed: bool, consistent: bool, check: "contract_consistency",
+         label: str, structural: bool, independent: bool,
+         max_abs_diff: float, tolerance: float,
          per_stock: {sym: {target_allocation, decision, diff}}, nse_only}
     """
     ta = get_target_allocations(portfolio=portfolio)  # {sym: pct_of_total}
@@ -996,11 +1012,16 @@ def verify_target_agreement(
         from trading.services.decision import generate_proposal
         prop = generate_proposal(tilt="Balanced", nse_only=nse_only)
     except Exception:
-        # Fail-open: if the Decision Engine is unavailable, we cannot prove
-        # agreement, but we must not block the live path. Report as a
+        # Fail-open: if the Decision Engine is unavailable, the contract cannot
+        # be checked, but we must not block the live path. Report as a
         # single-sided report (no divergence detected, but unverified).
         return {
             "agreed": True,
+            "consistent": True,
+            "check": "contract_consistency",
+            "label": CONTRACT_CHECK_LABEL,
+            "structural": True,
+            "independent": False,
             "max_abs_diff": 0.0,
             "tolerance": tolerance,
             "per_stock": {s: {"target_allocation": round(p, 2),
@@ -1030,6 +1051,11 @@ def verify_target_agreement(
 
     return {
         "agreed": max_diff <= tolerance,
+        "consistent": max_diff <= tolerance,
+        "check": "contract_consistency",
+        "label": CONTRACT_CHECK_LABEL,
+        "structural": True,
+        "independent": False,
         "max_abs_diff": round(max_diff, 2),
         "tolerance": tolerance,
         "per_stock": per_stock,

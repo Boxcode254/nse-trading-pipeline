@@ -51,9 +51,10 @@ from __future__ import annotations
 import os
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Mapping, Optional
 
 from .. import config
+from .. import tradability
 from . import ranking as ranking_svc
 from ..execution.retry import call_with_timeout
 
@@ -131,6 +132,7 @@ class AllocationLine:
     why_increase: str    # "What would trigger raising this allocation"
     why_reduce: str      # "What would trigger cutting back"
     conviction: str      # "strong" | "moderate" | "weak" — how confident in this line
+    executable: bool = True  # True only for lines inside the executable NSE mandate
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -143,6 +145,11 @@ class AllocationProposal:
     ``allocations`` is a list of :class:`AllocationLine`. The ``summary``
     is a per-category roll-up so the CLI can show both the per-line
     table and the category totals without re-aggregating.
+
+    ``mandate`` states what this system actually executes (NSE equities with
+    a ~10% cash reserve). ``wealth_context`` holds the broader gold/forex/
+    T-bill allocation arithmetic, which is CONTEXT ONLY — it is not tracked,
+    not executed and must never be presented as part of the mandate (TP-007).
     """
     timestamp: str
     market_regime: str
@@ -151,6 +158,8 @@ class AllocationProposal:
     allocations: list[AllocationLine] = field(default_factory=list)
     summary: dict[str, float] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
+    mandate: dict[str, Any] = field(default_factory=dict)
+    wealth_context: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -161,6 +170,8 @@ class AllocationProposal:
             "allocations": [a.to_dict() for a in self.allocations],
             "summary": dict(self.summary),
             "notes": list(self.notes),
+            "mandate": dict(self.mandate),
+            "wealth_context": [dict(w) for w in self.wealth_context],
         }
 
 
@@ -417,6 +428,73 @@ def _safe_round(x: float, n: int = 2) -> float:
         return 0.0
 
 
+# ── Mandate vs broader wealth-allocation CONTEXT (TP-007) ─────────────
+#
+# The system is an NSE EQUITY ALLOCATOR with a ~10% cash reserve. That is the
+# only thing it can actually trade (paper). The gold / forex / T-bill buckets
+# are broader wealth-allocation arithmetic: they are not tracked, not
+# executable, and must be labelled as context so a reader never mistakes them
+# for part of the mandate.
+
+MANDATE_ASSET_CLASS = "NSE equities"
+CONTEXT_ONLY_NOTE = (
+    "Broader wealth-allocation CONTEXT only — not tracked, not executable, "
+    "and not part of the NSE equity mandate this system runs."
+)
+
+_WEALTH_CONTEXT_CATEGORIES: tuple[tuple[str, str], ...] = (
+    ("forex", "Forex"),
+    ("gold", "Gold"),
+    ("tbills", "T-Bills"),
+)
+
+
+def mandate(executable: bool = True) -> dict[str, Any]:
+    """The auto-trader's explicit mandate: NSE equity allocator + cash reserve.
+
+    Cash-reserve and invested percentages are read from the live
+    target-allocation engine so there is ONE source of truth for the split.
+    """
+    cash_pct, invested_pct = 10.0, 90.0
+    try:
+        from trading import target_allocation as ta
+        cash_pct = float(ta.CASH_RESERVE_PCT)
+        invested_pct = float(getattr(ta, "TARGET_INVESTED_PCT", 100.0 - cash_pct))
+    except Exception:  # noqa: BLE001 — mandate must render even if that import fails
+        pass
+    return {
+        "label": f"NSE equity allocator — ~{cash_pct:.0f}% cash reserve (paper)",
+        "asset_class": MANDATE_ASSET_CLASS,
+        "cash_reserve_pct": cash_pct,
+        "target_invested_pct": invested_pct,
+        "executable": executable,
+        "mode": "paper",
+        "note": (
+            "This is the mandate the auto-trader actually executes. "
+            "Any gold / forex / T-bill figures in this output are broader "
+            "wealth-allocation context and are NOT executable here."
+        ),
+    }
+
+
+def wealth_context(cat_targets: Mapping[str, float]) -> list[dict[str, Any]]:
+    """Broader multi-asset arithmetic, explicitly flagged as non-executable."""
+    out: list[dict[str, Any]] = []
+    for key, label in _WEALTH_CONTEXT_CATEGORIES:
+        pct = _safe_round(cat_targets.get(key, 0.0))
+        if pct <= 0:
+            continue
+        out.append({
+            "label": label,
+            "category": key,
+            "target_pct": pct,
+            "executable": False,
+            "tracked": False,
+            "note": CONTEXT_ONLY_NOTE,
+        })
+    return out
+
+
 def compute_category_targets(
     tilt: str,
     avg_score: float,
@@ -598,6 +676,14 @@ def generate_proposal(
     # Equities
     for entry in stock_alloc:
         sym = entry["symbol"]
+        # TP-003: a suspended/halted name must never receive an executable
+        # allocation target, however it entered the candidate list.
+        if not tradability.is_tradable(sym):
+            notes.append(
+                f"{sym} excluded from targets: not tradeable "
+                f"({tradability.verdict(sym).detail})"
+            )
+            continue
         target = _safe_round(entry["pct"])
         meta = config.get_asset_category(sym)
         current = current_pcts.get(sym, 0.0)
@@ -716,6 +802,8 @@ def generate_proposal(
         allocations=lines,
         summary=summary,
         notes=notes,
+        mandate=mandate(),
+        wealth_context=wealth_context(cat_targets),
     )
 
 
@@ -784,11 +872,25 @@ def build_rationale(
         parts.append(f"Volatility is {vol_tag}.")
     parts.append(f"Strategy tilt: {tilt}.")
 
-    # 2. Category targets in one line
-    cat_str = ", ".join(
-        f"{int(cat_targets[k])}% {k}" for k in ("equities", "forex", "gold", "tbills", "cash")
+    # 1b. MANDATE — state what is actually executable up front (TP-007)
+    parts.append(
+        "Mandate: NSE equity allocator with a "
+        f"~{int(cat_targets.get('cash', 10))}% cash reserve "
+        f"({int(cat_targets.get('equities', 0))}% equities)."
     )
-    parts.append(f"Target allocation: {cat_str}.")
+
+    # 2. Category targets — executable mandate vs broader CONTEXT
+    context_bits = [
+        f"{int(cat_targets.get(k, 0))}% {label}"
+        for k, label in _WEALTH_CONTEXT_CATEGORIES
+        if cat_targets.get(k, 0)
+    ]
+    if context_bits:
+        parts.append(
+            "Broader wealth-allocation context only ("
+            + ", ".join(context_bits)
+            + ") — not tracked, not executable, not part of the mandate."
+        )
 
     # 3. Equity logic
     if equity_lines:
@@ -805,16 +907,13 @@ def build_rationale(
                 f"with a {int(_single_stock_cap(tilt))}% single-stock cap."
             )
 
-    # 4. Gold
-    parts.append(
-        "Gold acts as portfolio hedge — recommended even though not tracked."
-    )
-
-    # 4b. T-Bills
-    tbills_pct = int(cat_targets.get("tbills", 0))
-    parts.append(
-        f"T-Bills at {tbills_pct}% provide a yield-bearing income floor."
-    )
+    # 4. Gold / T-Bills are CONTEXT ONLY — never presented as mandate lines.
+    #    (They are not tracked and not executable in this system.)
+    if context_bits:
+        parts.append(
+            "Gold and T-Bill figures above are wealth-allocation context; "
+            "they do not generate trades."
+        )
 
     # 5. Portfolio state hint
     if portfolio is None:
@@ -854,6 +953,12 @@ def format_proposal(proposal: AllocationProposal, verbose: bool = False) -> str:
     console.print("━" * 50)
     console.print(f"  [bold]Market Regime:[/]  {proposal.market_regime}")
     console.print(f"  [bold]Strategy Tilt:[/]  {proposal.strategy_tilt}")
+    mandate_info = proposal.mandate or {}
+    console.print(
+        f"  [bold]Mandate:[/]      "
+        f"{mandate_info.get('label', 'NSE equity allocator — ~10% cash reserve (paper)')}"
+    )
+    console.print("  [bold]Mode:[/]         PAPER — no real broker integration")
     console.print(f"  [bold]Generated:[/]      {proposal.timestamp}")
     console.print("")
 
@@ -865,6 +970,7 @@ def format_proposal(proposal: AllocationProposal, verbose: bool = False) -> str:
     table.add_column("Target", justify="right")
     table.add_column("Current", justify="right")
     table.add_column("Action", justify="center")
+    table.add_column("Scope", justify="center")
     if verbose:
         table.add_column("Reason")
 
@@ -895,6 +1001,7 @@ def format_proposal(proposal: AllocationProposal, verbose: bool = False) -> str:
             f"{line.target_pct:5.1f}%",
             f"{line.current_pct:5.1f}%",
             f"[{style}]{action_emoji}[/]",
+            "executable" if line.executable else "context only",
         ]
         if verbose:
             row.append(line.reason)
@@ -907,13 +1014,26 @@ def format_proposal(proposal: AllocationProposal, verbose: bool = False) -> str:
     total_table = Table(show_header=True, header_style="bold", expand=True)
     total_table.add_column("Category")
     total_table.add_column("Target", justify="right")
+    total_table.add_column("Scope", justify="center")
     summary = proposal.summary or {}
+    executable_categories = {"equities", "cash"}
     for cat in ("equities", "forex", "commodity", "cash", "fixed_income"):
         total_table.add_row(
             DISPLAY_CATEGORIES.get(cat, cat.title()),
             f"{summary.get(cat, 0.0):5.1f}%",
+            "executable" if cat in executable_categories else "context only",
         )
     console.print(total_table)
+
+    # Broader wealth-allocation context — explicitly separated from the mandate
+    if proposal.wealth_context:
+        console.print("")
+        console.print("[bold]BROADER WEALTH-ALLOCATION CONTEXT (NOT EXECUTABLE)[/]")
+        for item in proposal.wealth_context:
+            console.print(
+                f"  • {item.get('label')}: {item.get('target_pct'):.1f}% — "
+                f"{item.get('note')}"
+            )
 
     # Rationale
     console.print("")

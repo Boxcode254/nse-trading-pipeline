@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from .. import output
 from ... import config
+from ... import tradability
 from ...services import advisor, ranking as ranking_svc, signal as signal_svc
 from ...signals import engine as signal_engine
 from ...signals import validator as signal_validator
@@ -25,6 +26,19 @@ def run(symbol: str, quiet: bool = False, as_json: bool = False,
     - Otherwise, prints the paragraph followed by a one-line score footer.
     """
     pair = symbol  # in this codebase, the symbol IS the pair
+
+    # ── Tradability gate ─────────────────────────────────────────────
+    # Suspended/halted/locked names get the canonical non-tradable
+    # response — never an explanation of a score that should not exist.
+    static = tradability.static_verdict(symbol)
+    if not static.tradable:
+        payload = signal_svc.non_tradable_payload(symbol, static)
+        if as_json:
+            print(output.json_dumps(payload))
+        else:
+            print(payload["message"])
+        return 0
+
     ranked, pair_signals = _gather_context(pair)
 
     explanation = advisor.explain_symbol(

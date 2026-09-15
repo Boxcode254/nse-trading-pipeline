@@ -45,7 +45,8 @@ def run(
         as_json: Emit JSON document.
         show_rebalance: Show rebalance plan.
         dry_run: Preview only (default True).
-        verify: Run the engine-agreement gate (target_allocation vs decision).
+        verify: Run the structural contract-consistency check (target_allocation
+            vs decision engine). NOT an independent-agreement gate.
 
     Returns:
         0 = success
@@ -199,18 +200,25 @@ def _sector_of(symbol: str) -> str:
 
 
 def _print_verify(rep: dict[str, Any]) -> None:
-    """Print the engine-agreement gate result."""
+    """Print the engine contract-consistency check result.
+
+    This is STRUCTURAL, not independent agreement: in nse_only mode the
+    Decision Engine sources its equity targets from target_allocation, so a
+    match is expected by construction. The wording must not imply two
+    independent models agreed (TP-007).
+    """
     print()
-    print("  Engine Target-Agreement Gate")
+    print("  Engine Contract-Consistency Check")
     print(f"  {'=' * 60}")
-    flag = "✅ AGREE" if rep["agreed"] else "❌ DIVERGE"
+    flag = "✅ CONSISTENT" if rep["agreed"] else "❌ INCONSISTENT"
     verified = rep.get("verified", True)
     mode = "nse_only" if rep.get("nse_only") else "multi-asset"
+    print(f"  Type:        structural — same target contract, NOT independent model agreement")
     print(f"  Mode:        {mode}")
     print(f"  Status:      {flag}")
     print(f"  Max diff:    {rep['max_abs_diff']:.2f}%   (tolerance {rep['tolerance']:.1f}%)")
     if not verified:
-        print("  ⚠️  Decision Engine unreachable — verification inconclusive (fail-open).")
+        print("  ⚠️  Decision Engine unreachable — consistency inconclusive (fail-open).")
     print()
     print(f"  {'SYMBOL':<7} {'TARGET':>9} {'DECISION':>10} {'DIFF':>8}")
     print(f"  {'-' * 38}")

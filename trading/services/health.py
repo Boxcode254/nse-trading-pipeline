@@ -21,7 +21,10 @@ def _check_market_data() -> dict[str, Any]:
     """Check that at least one configured pair can be fetched."""
     try:
         t0 = time.time()
-        frames = market.fetch_all()
+        # include_suspended: this is a DATA-HEALTH check over every configured
+        # feed, not an investable universe — so it must not silently drop the
+        # suspended names (see trading.tradability for the investable filter).
+        frames = market.fetch_all(include_suspended=True)
         elapsed = time.time() - t0
         n_ok = len(frames)
         if n_ok == 0:

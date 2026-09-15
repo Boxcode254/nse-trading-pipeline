@@ -150,27 +150,31 @@ def test_rebalance_placeholder_returns_zero() -> None:
     assert result.exit_code == 0, f"rebalance should be a friendly placeholder: {result.output}"
 
 
-def test_legacy_run_entrypoint_still_works() -> None:
-    """``python3 -m trading run`` must still work (used by the daily cron)."""
-    import trading
-    # The legacy entry point uses argparse + cmd_run. Smoke-test that it imports.
-    from trading.__main__ import build_parser, cmd_run
-    parser = build_parser()
-    args = parser.parse_args(["run"])
-    assert args.func is cmd_run
+def test_legacy_entrypoint_delegates_to_canonical_cli() -> None:
+    """``python3 -m trading`` must run the SAME CLI as ``trading`` (TP-004)."""
+    from trading import __main__ as legacy
+    from trading.cli.main import app as canonical_app
+
+    # Same implementation: the shim calls trading.cli.main.main, which drives
+    # the canonical Typer app. Legacy names are translated, not re-implemented.
+    assert legacy.translate_legacy(["rank"]) == ["opportunities"]
+    assert legacy.translate_legacy(["allocate"]) == ["target"]
+    assert legacy.translate_legacy(["run"]) == ["morning"]
+    # Unknown/canonical argv passes through untouched.
+    assert legacy.translate_legacy(["target", "--json"]) == ["target", "--json"]
+
+    # And the canonical app really is a Typer app with the canonical commands.
+    from typer.main import get_command
+    command = get_command(canonical_app)
+    assert "opportunities" in command.commands
+    assert "signal" in command.commands
 
 
-def test_legacy_subcommands_present() -> None:
-    """All legacy subcommands the cron / external scripts may rely on must exist."""
-    from trading.__main__ import build_parser
-    parser = build_parser()
-    # The actions registered as choices
-    # argparse stores them in parser._subparsers._group_actions[0].choices
-    sub_action = next(a for a in parser._actions if hasattr(a, "choices") and a.choices)
-    names = set(sub_action.choices.keys())
-    assert {"run", "history", "backtest", "compare", "rank"} <= names, (
-        f"missing legacy subcommands: {names}"
-    )
+def test_legacy_only_subcommands_are_gone_with_hints() -> None:
+    """Legacy-only subcommands must fail loudly with a migration hint."""
+    from trading import __main__ as legacy
+    assert set(legacy.LEGACY_REMOVED) == {"history", "learn", "validators"}
+    assert legacy.main(["learn"]) == 2
 
 
 if __name__ == "__main__":
@@ -185,8 +189,8 @@ if __name__ == "__main__":
         test_config_validate,
         test_portfolio_subgroup_registered,
         test_rebalance_placeholder_returns_zero,
-        test_legacy_run_entrypoint_still_works,
-        test_legacy_subcommands_present,
+        test_legacy_entrypoint_delegates_to_canonical_cli,
+        test_legacy_only_subcommands_are_gone_with_hints,
     ]
     failed = 0
     for t in tests:

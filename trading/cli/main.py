@@ -458,22 +458,12 @@ def execute_macro_snapshot(
     raise typer.Exit(execute.macro_snapshot_cmd(as_json=as_json))
 
 
-@execute_app.command("plan")
-def execute_plan(
-    quiet: bool = typer.Option(False, "--quiet", "-q", help="Minimal output."),
-    as_json: bool = typer.Option(False, "--json", help="Emit JSON."),
-) -> None:
-    """Generate a trade plan from the current allocation proposal — does NOT execute."""
-    raise typer.Exit(execute.plan_cmd(quiet=quiet, as_json=as_json))
-
-
-@execute_app.command("deploy")
-def execute_deploy(
-    quiet: bool = typer.Option(False, "--quiet", "-q", help="Minimal output."),
-    as_json: bool = typer.Option(False, "--json", help="Emit JSON."),
-) -> None:
-    """Execute the current trade plan from allocation (safety-checked)."""
-    raise typer.Exit(execute.deploy_cmd(quiet=quiet, as_json=as_json))
+# NOTE: `execute plan` / `execute deploy` were advertised here but their
+# callbacks (execute.plan_cmd / execute.deploy_cmd) were never implemented,
+# so the commands crashed with AttributeError. Trade planning lives in
+# `trading rebalance` (with `--apply` to execute the plan) and in
+# `trading target --rebalance`; the broken advertisements are removed rather
+# than left in `--help`.
 
 
 # ── Portfolio Manager ───────────────────────────────────────────────────
@@ -571,7 +561,7 @@ def allocations_func(
     quiet: bool = typer.Option(False, "--quiet", "-q"),
     as_json: bool = typer.Option(False, "--json", help="Emit JSON on stdout."),
 ) -> None:
-    """Show target portfolio allocations (Phase-4 placeholder)."""
+    """Show target portfolio allocations (alias for ``trading target``)."""
     raise typer.Exit(allocations_cmd.run(quiet=quiet, as_json=as_json))
 
 
@@ -580,7 +570,7 @@ def target_command(
     quiet: bool = typer.Option(False, "--quiet", "-q"),
     as_json: bool = typer.Option(False, "--json", help="Emit JSON on stdout."),
     rebalance: bool = typer.Option(False, "--rebalance", help="Show rebalance trade plan."),
-    verify: bool = typer.Option(False, "--verify", help="Verify target_allocation vs decision engine agreement."),
+    verify: bool = typer.Option(False, "--verify", help="Run the structural contract-consistency check (target_allocation vs decision engine)."),
 ) -> None:
     """Show strategic sector-based target allocation vs current portfolio."""
     raise typer.Exit(target_cmd.run(quiet=quiet, as_json=as_json, show_rebalance=rebalance, verify=verify))
@@ -661,7 +651,7 @@ def config_edit() -> None:
 
 
 # ── Dashboard ──────────────────────────────────────────────────────────
-dashboard_app = typer.Typer(help="Trading supervision dashboard — PnL, signal quality, rule versions.")
+dashboard_app = typer.Typer(help="Current portfolio status (read-only, sourced from portfolio/mtm_state.json).")
 app.add_typer(dashboard_app, name="dashboard")
 
 
@@ -669,12 +659,16 @@ app.add_typer(dashboard_app, name="dashboard")
 def dashboard_default(
     ctx: typer.Context,
     html: bool = typer.Option(False, "--html", help="Output HTML instead of text."),
-    no_telegram: bool = typer.Option(False, "--no-telegram", help="Don't send to Telegram."),
-    output: Optional[str] = typer.Option(None, "--output", "-o", help="Write HTML to file."),
+    no_telegram: bool = typer.Option(False, "--no-telegram", help="Accepted for compatibility; nothing is sent."),
+    output: Optional[str] = typer.Option(None, "--output", "-o", help="Write the output to FILE."),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Minimal output."),
     as_json: bool = typer.Option(False, "--json", help="Emit JSON."),
 ) -> None:
-    """Generate and display the supervision dashboard report."""
+    """Print the canonical CURRENT portfolio status (read-only).
+
+    Replaces the retired paper-engine dashboard, which presented archived
+    data as if it were live.
+    """
     if ctx.invoked_subcommand is not None:
         return
     raise typer.Exit(dashboard_cmd.run(
@@ -682,13 +676,9 @@ def dashboard_default(
     ))
 
 
-@dashboard_app.command("serve")
-def dashboard_serve(
-    port: int = typer.Option(9210, "--port", "-p", help="HTTP port."),
-    quiet: bool = typer.Option(False, "--quiet", "-q", help="Minimal output."),
-) -> None:
-    """Start a live web server serving the dashboard HTML (regenerates on each request)."""
-    raise typer.Exit(dashboard_cmd.serve(port=port, quiet=quiet))
+# The former `dashboard serve` web server (which regenerated the ARCHIVED
+# dashboard HTML on every request) is removed with the archived surface.
+# Use `trading dashboard --output status.html` and serve it statically.
 
 
 # ── Monthly Report ────────────────────────────────────────────────────────

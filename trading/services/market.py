@@ -11,15 +11,22 @@ from typing import Any, Optional
 import pandas as pd
 
 from .. import config
+from .. import tradability
 from ..fetchers import fetch_data
 
 
-def fetch_all() -> dict[str, pd.DataFrame]:
-    """Fetch OHLCV for every configured pair.
+def fetch_all(include_suspended: bool = False) -> dict[str, pd.DataFrame]:
+    """Fetch OHLCV for the eligible configured pairs.
 
     Returns a ``{pair: DataFrame}`` dict. Failures are skipped (the
-    DataFrame is omitted from the result); the caller can detect
-    missing pairs by comparing the keys to ``config.PAIRS``.
+    DataFrame is omitted from the result).
+
+    Suspended / halted / OHLC-locked names are excluded from the returned
+    universe by default (see :mod:`trading.tradability`) so every derived
+    surface — signals, ranking, opportunities, decision targets, benchmark
+    baskets — inherits the same eligible universe. Pass
+    ``include_suspended=True`` for data-health checks that must account for
+    every configured feed (e.g. ``trading doctor``).
     """
     config.ensure_dirs()
     out: dict[str, pd.DataFrame] = {}
@@ -31,7 +38,18 @@ def fetch_all() -> dict[str, pd.DataFrame]:
         if df is None or df.empty:
             continue
         out[pair] = df
-    return out
+    if include_suspended:
+        return out
+    return {
+        pair: df for pair, df in out.items()
+        if tradability.is_tradable(pair, df)
+    }
+
+
+def eligible_pairs(bars: Optional[dict[str, pd.DataFrame]] = None) -> list[str]:
+    """The tradable slice of ``config.PAIRS`` (static list, or *bars* keys)."""
+    return tradability.eligible_pairs(list(bars) if bars else None, bars)
+
 
 
 def fetch_one(pair: str, days: Optional[int] = None) -> pd.DataFrame:

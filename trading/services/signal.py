@@ -11,10 +11,34 @@ from typing import Any, Optional
 import pandas as pd
 
 from .. import config
+from .. import tradability
 from ..ranking import ranker, scorer
 from ..signals import engine as signal_engine
 from ..signals import validator as signal_validator
 from . import market
+
+
+def non_tradable_payload(symbol: str, verdict: tradability.TradabilityVerdict) -> dict[str, Any]:
+    """The canonical response for a suspended/halted/locked symbol.
+
+    Deliberately carries NO score, recommendation, holding period, price
+    target or action — a non-tradable name must not look investable in any
+    consumer (CLI, dashboard, REST).
+    """
+    return {
+        "symbol": verdict.symbol or symbol,
+        "tradable": False,
+        "status": verdict.status,
+        "reason": verdict.reason,
+        "message": f"{verdict.symbol or symbol} is NOT tradeable: {verdict.detail}",
+        "detail": verdict.detail,
+        "score": None,
+        "recommendation": None,
+        "holding_period": None,
+        "confidence": None,
+        "indicators": {},
+        "source": None,
+    }
 
 
 def recommendation_for(score: float) -> str:
@@ -55,7 +79,20 @@ def signal_for_symbol(
         }
     """
     pair = pair or symbol
+
+    # ── Tradability gate (single predicate) ──────────────────────────
+    # A suspended/halted/OHLC-locked name must never produce a score,
+    # forecast, holding period or action — return the canonical
+    # non-tradable response instead.
+    static = tradability.static_verdict(symbol)
+    if not static.tradable:
+        return non_tradable_payload(symbol, static)
+
     df = market.fetch_one(pair)
+    if df is not None and not df.empty:
+        dynamic = tradability.verdict(symbol, df)
+        if not dynamic.tradable:
+            return non_tradable_payload(symbol, dynamic)
     if df is None or df.empty:
         return {"symbol": symbol, "score": 0.0, "recommendation": config.TIER_AVOID,
                 "confidence": 0.0, "explanation": "No data available.", "indicators": {}}
@@ -102,6 +139,9 @@ def explain_symbol(symbol: str, pair: Optional[str] = None) -> dict[str, Any]:
         }
     """
     out = signal_for_symbol(symbol, pair=pair)
+    if not out.get("tradable", True):
+        out["explanation"] = out.get("message", f"{symbol} is not tradeable.")
+        return out
     score = out["score"]
     recommendation = out["recommendation"]
     ind = out["indicators"]

@@ -362,13 +362,11 @@ def test_format_factor_breakdown() -> None:
         assert name in text or name.replace("_", " ") in text.lower()
 
 
-def test_ranking_registered_in_cli() -> None:
-    """The `rank` subcommand is registered in __main__.build_parser()."""
-    from trading.__main__ import build_parser
-    parser = build_parser()
-    # Should not raise; "rank" should be a recognised subcommand
-    args = parser.parse_args(["rank"])
-    assert args.command == "rank"
+def test_legacy_entrypoint_delegates_rank_to_opportunities() -> None:
+    """The old `rank` subcommand now routes to the canonical CLI (TP-004)."""
+    from trading import __main__ as legacy
+    assert legacy.translate_legacy(["rank"]) == ["opportunities"]
+    assert legacy.translate_legacy(["rank", "--top", "3"]) == ["opportunities", "--top", "3"]
 
 
 # ── Config integration ───────────────────────────────────────────────

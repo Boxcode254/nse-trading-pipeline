@@ -102,6 +102,22 @@ def main():
     )
     args = parser.parse_args()
 
+    # ── Tradability gate ─────────────────────────────────────────────
+    # A suspended/halted/locked symbol must not receive a price forecast.
+    from ... import tradability
+    from ...services.signal import non_tradable_payload
+
+    static = tradability.static_verdict(args.symbol)
+    if not static.tradable:
+        payload = non_tradable_payload(args.symbol, static)
+        payload.pop("indicators", None)
+        if args.json:
+            print(json.dumps(payload, indent=2))
+        else:
+            print(f"\n⛔  {payload['symbol']} — NO FORECAST ({payload['reason']})")
+            print(f"   {payload['message']}")
+        return 0
+
     # Get price history and volatility from trading CLI
     import subprocess
     trading_root = Path(os.environ.get("TRADING_ROOT", Path.home() / ".trading"))
