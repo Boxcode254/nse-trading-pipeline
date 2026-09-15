@@ -24,6 +24,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from ..price_source import resolve_prices
+
 MTM_FILENAME = "mtm_state.json"
 STATE_FILENAME = "state.json"
 
@@ -59,7 +61,10 @@ def _age_days(value: Any) -> Optional[float]:
     return round(delta.total_seconds() / 86400.0, 2)
 
 
-def current_status(dir_path: Optional[str] = None) -> dict[str, Any]:
+def current_status(
+    dir_path: Optional[str] = None,
+    as_of: Any = None,
+) -> dict[str, Any]:
     """Return the canonical current portfolio status.
 
     Shape (stable, JSON-serialisable)::
@@ -67,18 +72,30 @@ def current_status(dir_path: Optional[str] = None) -> dict[str, Any]:
         {
           "mode": "PAPER",
           "as_of": "<mtm generated_at or unknown>",
+          "as_of_date": "2026-09-15",
           "age_days": 0.84,
           "source": "mtm_state.json (mark-to-market)",
+          "valuation_basis": "...",
           "portfolio_value": 105275.28,
           "cash": 23020.0,
           "invested": 82255.28,
           "initial_capital": 100000.0,
-          "positions": [ {symbol, shares, live_price, current_value, pnl, pnl_pct}, ... ],
+          "positions": [ {symbol, shares, live_price, current_value, pnl, pnl_pct,
+                          price_source}, ... ],
           "position_count": 9,
           "total_pnl": 0.56,
           "total_pnl_pct": 0.0,
+          "eligible_universe": ["ABSA", ...],
+          "resolver": {as_of, price_date, official_close_file,
+                       official_close_age_days, stale, sources},
           "current": True,
         }
+
+    ``price_source`` per position comes from the shared authority-chain
+    resolver (:mod:`trading.price_source`: AXYS official close > feed > CSV),
+    so every surface can show WHERE a mark came from. The valuation itself
+    stays the auto-trader's mark-to-market stamp — this function never
+    rewrites it, it only labels it.
 
     Missing state is reported explicitly rather than as a zero book.
     """
@@ -91,26 +108,53 @@ def current_status(dir_path: Optional[str] = None) -> dict[str, Any]:
             with open(mtm_path) as f:
                 data = json.load(f)
         except (OSError, ValueError) as exc:
-            return _empty(f"unreadable {MTM_FILENAME}: {exc}")
-        return _from_mtm(data)
+            return _with_provenance(_empty(f"unreadable {MTM_FILENAME}: {exc}"), base, as_of)
+        status = _from_mtm(data)
+        status["valuation_basis"] = "auto-trader mark-to-market stamp (mtm_state.json)"
+        return _with_provenance(status, base, as_of)
 
     if state_path.exists():
         try:
             with open(state_path) as f:
                 data = json.load(f)
         except (OSError, ValueError) as exc:
-            return _empty(f"unreadable {STATE_FILENAME}: {exc}")
-        return _from_state(data)
+            return _with_provenance(_empty(f"unreadable {STATE_FILENAME}: {exc}"), base, as_of)
+        status = _from_state(data)
+        status["valuation_basis"] = "cost basis (state.json fallback, MTM stamp missing)"
+        return _with_provenance(status, base, as_of)
 
-    return _empty(SOURCE_NONE)
+    return _with_provenance(_empty(SOURCE_NONE), base, as_of)
+
+
+def _with_provenance(
+    status: dict[str, Any], base: Path, as_of: Any = None
+) -> dict[str, Any]:
+    """Attach the shared resolver's provenance to a status payload."""
+    symbols = [
+        p.get("symbol") for p in status.get("positions") or [] if p.get("symbol")
+    ]
+    status["eligible_universe"] = symbols
+    status["as_of_date"] = (status.get("as_of") or "")[:10] or None
+    if status.get("portfolio_value") is None:
+        status["resolver"] = None
+        status["price_date"] = None
+        return status
+    res = resolve_prices(symbols, str(base), as_of=as_of)
+    for pos in status.get("positions") or []:
+        pos["price_source"] = res.sources.get(pos.get("symbol"), "stored")
+    status["resolver"] = res.provenance()
+    status["price_date"] = res.price_date
+    return status
 
 
 def _empty(source: str) -> dict[str, Any]:
     return {
         "mode": "PAPER",
         "as_of": None,
+        "as_of_date": None,
         "age_days": None,
         "source": source,
+        "valuation_basis": "no state",
         "portfolio_value": None,
         "cash": None,
         "invested": None,
@@ -119,6 +163,9 @@ def _empty(source: str) -> dict[str, Any]:
         "position_count": 0,
         "total_pnl": None,
         "total_pnl_pct": None,
+        "eligible_universe": [],
+        "resolver": None,
+        "price_date": None,
         "current": False,
     }
 
@@ -147,6 +194,8 @@ def _from_mtm(data: dict[str, Any]) -> dict[str, Any]:
             {
                 "symbol": p.get("symbol"),
                 "shares": p.get("shares"),
+                "avg_cost": p.get("avg_cost"),
+                "total_cost": p.get("total_cost"),
                 "live_price": p.get("live_price"),
                 "current_value": p.get("current_value"),
                 "pnl": p.get("pnl"),
@@ -182,6 +231,10 @@ def _from_state(data: dict[str, Any]) -> dict[str, Any]:
             {
                 "symbol": p.get("symbol"),
                 "shares": p.get("shares"),
+                "avg_cost": p.get("avg_cost"),
+                "total_cost": round(
+                    float(p.get("shares") or 0) * float(p.get("avg_cost") or 0.0), 2
+                ),
                 "live_price": p.get("avg_cost"),
                 "current_value": round(
                     float(p.get("shares") or 0) * float(p.get("avg_cost") or 0.0), 2
@@ -205,6 +258,8 @@ def format_status(status: dict[str, Any]) -> str:
     lines.append("=" * 52)
     lines.append(f"  Mode:     {status.get('mode', 'PAPER')} (no real broker)")
     lines.append(f"  Source:   {status.get('source')}")
+    if status.get("valuation_basis"):
+        lines.append(f"  Basis:    {status['valuation_basis']}")
     as_of = status.get("as_of") or "unknown"
     age = status.get("age_days")
     age_note = f"  ({age:g} days old)" if isinstance(age, (int, float)) else ""

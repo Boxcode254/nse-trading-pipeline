@@ -78,17 +78,39 @@ def axys_file_date(filename: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
+def _coerce_date(value: Any) -> Optional[datetime.date]:
+    """Accept a date, a datetime or an ISO-ish string; return a date."""
+    if value is None:
+        return None
+    if isinstance(value, datetime.datetime):
+        return value.date()
+    if isinstance(value, datetime.date):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.date.fromisoformat(value[:10])
+        except ValueError:
+            return None
+    return None
+
+
 def load_axys_closes(
     dir_path: Optional[str] = None,
+    as_of: Any = None,
 ) -> tuple[dict[str, float], Optional[str], int]:
     """Return (closes, source_filename, age_days) for the newest usable file.
 
     Walks back up to AXYS_SEARCH_WINDOW_DAYS looking for an
     ``axys_closes_<date>.json`` that actually carries prices. Returns
     ``({}, None, -1)`` when nothing usable is in the window.
+
+    ``as_of`` (date | datetime | "YYYY-MM-DD") anchors the walk-back so a
+    comparison can be reproduced for a historical as-of date instead of
+    silently pricing everything off *today*. Default None == today, which
+    preserves every existing caller's behaviour.
     """
     base = _portfolio_dir(dir_path)
-    today = datetime.date.today()
+    today = _coerce_date(as_of) or datetime.date.today()
     for back in range(0, AXYS_SEARCH_WINDOW_DAYS + 1):
         d = (today - datetime.timedelta(days=back)).isoformat()
         p = base / f"axys_closes_{d}.json"
@@ -108,15 +130,29 @@ def load_axys_closes(
     return {}, None, -1
 
 
-def _load_feed_prices(dir_path: Optional[str] = None) -> dict[str, float]:
-    """live_price per symbol from mtm_state.json (the intraday feed)."""
+def _load_feed_prices(
+    dir_path: Optional[str] = None,
+    as_of: Any = None,
+) -> tuple[dict[str, float], Optional[str]]:
+    """live_price per symbol from mtm_state.json (the intraday feed).
+
+    Returns ``(prices, stamp_date)``. The feed is a *live* stamp: it is only
+    a valid as-of price when the requested as-of date is the day the stamp
+    was written. A historical as-of therefore gets ``({}, stamp_date)`` so the
+    caller falls through to the official close instead of borrowing today's
+    tape for a past date.
+    """
     p = _portfolio_dir(dir_path) / "mtm_state.json"
     if not p.exists():
-        return {}
+        return {}, None
     try:
         data = json.loads(p.read_text())
     except (OSError, json.JSONDecodeError):
-        return {}
+        return {}, None
+    stamp = (data.get("generated_at") or "")[:10] or None
+    want = _coerce_date(as_of)
+    if want is not None and stamp and want.isoformat() != stamp:
+        return {}, stamp
     out: dict[str, float] = {}
     for pos in data.get("positions", []):
         sym = pos.get("symbol")
@@ -126,7 +162,7 @@ def _load_feed_prices(dir_path: Optional[str] = None) -> dict[str, float]:
                 out[sym] = float(lp)
             except (TypeError, ValueError):
                 continue
-    return out
+    return out, stamp
 
 
 def _csv_close(
@@ -161,16 +197,34 @@ class PriceResolution:
         sources: dict[str, str],
         axys_file: Optional[str],
         axys_age_days: int,
+        as_of: Optional[str] = None,
+        price_date: Optional[str] = None,
     ) -> None:
         self.prices = prices
         self.sources = sources
         self.axys_file = axys_file
         self.axys_age_days = axys_age_days
+        # ISO date the resolution was requested for (None == "now").
+        self.as_of = as_of
+        # ISO date the winning prices actually come from (official close file
+        # date, or the feed stamp date). None when nothing resolved.
+        self.price_date = price_date
 
     @property
     def axys_stale(self) -> bool:
         """True when the official close backing us is past the alert standard."""
         return self.axys_age_days < 0 or self.axys_age_days > STALE_MAX_DAYS
+
+    def provenance(self) -> dict[str, Any]:
+        """Machine-readable provenance — the audit trail for a valuation."""
+        return {
+            "as_of": self.as_of,
+            "price_date": self.price_date,
+            "official_close_file": self.axys_file,
+            "official_close_age_days": self.axys_age_days,
+            "stale": self.axys_stale,
+            "sources": dict(self.sources),
+        }
 
     def summary(self) -> str:
         counts: dict[str, int] = {}
@@ -187,30 +241,45 @@ class PriceResolution:
 def resolve_prices(
     symbols: list[str],
     dir_path: Optional[str] = None,
+    as_of: Any = None,
 ) -> PriceResolution:
     """Resolve each symbol to its most authoritative available price.
 
     AXYS official close > mtm_state feed > CSV cache > unresolved.
+
+    ``as_of`` anchors the resolution to a date (default: now). Prices are
+    never borrowed from a *different* date: the feed only counts when its
+    stamp matches the requested date, and the official-close walk-back starts
+    at ``as_of`` rather than today.
     """
-    closes, axys_file, age = load_axys_closes(dir_path)
-    feed = _load_feed_prices(dir_path)
+    want = _coerce_date(as_of)
+    want_iso = want.isoformat() if want else None
+    closes, axys_file, age = load_axys_closes(dir_path, as_of=want)
+    feed, feed_stamp = _load_feed_prices(dir_path, as_of=want)
 
     prices: dict[str, float] = {}
     sources: dict[str, str] = {}
+    price_date: Optional[str] = None
     for sym in symbols:
         if sym in closes and closes[sym] > 0:
             prices[sym] = closes[sym]
             sources[sym] = "axys"
+            if price_date is None:
+                price_date = axys_file_date(axys_file) if axys_file else None
             continue
         if sym in feed and feed[sym] > 0:
             prices[sym] = feed[sym]
             sources[sym] = "feed"
+            if price_date is None:
+                price_date = feed_stamp
             continue
         c = _csv_close(sym, dir_path)
         if c and c > 0:
             prices[sym] = c
             sources[sym] = "csv"
-    return PriceResolution(prices, sources, axys_file, age)
+    return PriceResolution(
+        prices, sources, axys_file, age, as_of=want_iso, price_date=price_date
+    )
 
 
 def apply_authoritative_prices(

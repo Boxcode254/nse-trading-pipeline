@@ -25,6 +25,8 @@ from .. import output
 from ... import config as _config
 from ...portfolio import engine as pf
 from ...services import market, signal as signal_svc
+from ...services import benchmark_compare as bc
+from ...services import portfolio_status as ps
 
 # ── Helpers ───────────────────────────────────────────────────────────────
 def _signal_for_reason(symbol: str) -> tuple[str, dict[str, Any]]:
@@ -120,46 +122,85 @@ def init_cmd(capital: float, force: bool, as_json: bool, quiet: bool) -> int:
 
 # ── Subcommand: show ──────────────────────────────────────────────────────
 def show_cmd(as_json: bool, quiet: bool) -> int:
+    """Current paper book — read ONLY through the canonical read model.
+
+    TP-005: this used to compute its own total via ``fetch_latest_prices``
+    (market service) while ``portfolio/mtm_state.json`` carried a different
+    number, so one book had two values. Every value below now comes from
+    :mod:`trading.services.portfolio_status`; the benchmark side comes from
+    :mod:`trading.services.benchmark_compare`, which refuses to publish a gap
+    it cannot establish as same-date/same-universe.
+    """
     if not pf.portfolio_exists():
         return _err(
             "No portfolio found. Run 'trading portfolio init --capital 100000' first.",
             as_json,
         )
-    try:
-        state = pf.load_state()
-    except pf.PortfolioError as exc:
-        return _err(str(exc), as_json)
+    status = ps.current_status()
+    if status.get("portfolio_value") is None:
+        return _err(f"No current portfolio state ({status.get('source')}).", as_json)
 
-    symbols = [p.symbol for p in state.positions]
-    prices = pf.fetch_latest_prices(symbols) if symbols else {}
-    holdings, rows = pf.compute_holdings_value(state, prices)
-    total_value = round(state.cash + holdings, 2)
+    total_value = status["portfolio_value"]
+    initial_capital = status.get("initial_capital") or 0.0
     total_return_pct = (
-        0.0 if state.initial_capital <= 0
-        else (total_value - state.initial_capital) / state.initial_capital * 100.0
+        0.0 if initial_capital <= 0
+        else (total_value - initial_capital) / initial_capital * 100.0
     )
+    holdings = status.get("invested") or 0.0
 
-    # Most recent benchmark value (if snapshots exist)
-    bench = pf.load_benchmark()
-    bench_snaps = bench.get("snapshots", [])
-    benchmark_value = bench_snaps[-1]["value"] if bench_snaps else state.initial_capital
-    bench_return_pct = (
-        0.0 if state.initial_capital <= 0
-        else (benchmark_value - state.initial_capital) / state.initial_capital * 100.0
-    )
+    # Drawdown is ledger metadata (state.json), not a valuation — labelled as
+    # such so it is never read as a second portfolio total.
+    max_drawdown_pct = None
+    try:
+        max_drawdown_pct = round(pf.load_state().max_drawdown_pct, 2)
+    except pf.PortfolioError:
+        pass
+
+    comparison = bc.compare(portfolio_status=status)
+    rows = [
+        {
+            "symbol": p.get("symbol"),
+            "shares": p.get("shares"),
+            "avg_cost": p.get("avg_cost"),
+            "last_price": p.get("live_price"),
+            "value": p.get("current_value"),
+            "pnl": p.get("pnl"),
+            "pnl_pct": p.get("pnl_pct"),
+            "price_source": p.get("price_source"),
+        }
+        for p in status.get("positions") or []
+    ]
 
     payload = {
-        "initial_capital": state.initial_capital,
-        "cash": state.cash,
+        "initial_capital": status.get("initial_capital"),
+        "cash": status.get("cash"),
         "holdings_value": holdings,
         "total_value": total_value,
         "total_return_pct": round(total_return_pct, 2),
-        "max_drawdown_pct": round(state.max_drawdown_pct, 2),
-        "benchmark_value": benchmark_value,
-        "benchmark_return_pct": round(bench_return_pct, 2),
+        "max_drawdown_pct": max_drawdown_pct,
+        "as_of": status.get("as_of"),
+        "as_of_date": status.get("as_of_date"),
+        "price_date": status.get("price_date"),
+        "source": status.get("source"),
+        "valuation_basis": status.get("valuation_basis"),
+        "price_provenance": status.get("resolver"),
+        "eligible_universe": status.get("eligible_universe"),
+        "position_count": status.get("position_count"),
+        "benchmark_value": (comparison.get("benchmark") or {}).get("recorded_value"),
+        "benchmark_return_pct": (comparison.get("benchmark") or {}).get("return_pct"),
+        "benchmark_comparison": {
+            "comparison_status": comparison.get("comparison_status"),
+            "reason_codes": comparison.get("reason_codes"),
+            "as_of": comparison.get("as_of"),
+            "benchmark_snapshot_date": comparison.get("benchmark_snapshot_date"),
+            "benchmark_universe_version": comparison.get("benchmark_universe_version"),
+            "gap_gross_pct": comparison.get("gap_gross_pct"),
+            "gap_net_pct": comparison.get("gap_net_pct"),
+            "gate_ok": comparison.get("gate_ok"),
+            "verdict": comparison.get("verdict"),
+        },
         "positions": rows,
-        "created_at": state.created_at,
-        "updated_at": state.updated_at,
+        "updated_at": status.get("as_of"),
     }
 
     if as_json or quiet:
@@ -168,7 +209,7 @@ def show_cmd(as_json: bool, quiet: bool) -> int:
     console = Console()
     console.print()
     console.print(Panel(
-        _format_show_body(payload),
+        _format_show_body(payload, comparison),
         title="📋 PAPER PORTFOLIO — Default",
         border_style="bold",
     ))
@@ -178,24 +219,41 @@ def show_cmd(as_json: bool, quiet: bool) -> int:
     return 0
 
 
-def _format_show_body(p: dict[str, Any]) -> str:
+def _format_show_body(p: dict[str, Any], comparison: dict[str, Any]) -> str:
     def fmt_pct(v: float) -> str:
         return f"{v:+.2f}%"
     def fmt_kes(v: float) -> str:
         return f"KES {v:,.2f}"
-    return (
-        f"  Initial Capital     {fmt_kes(p['initial_capital'])}\n"
-        f"  Current Value       {fmt_kes(p['total_value'])}\n"
-        f"  Total Return        {fmt_pct(p['total_return_pct'])}\n"
-        f"  Max Drawdown        {p['max_drawdown_pct']:+.2f}%\n"
-        f"  Cash                {fmt_kes(p['cash'])}\n"
-        f"  Holdings Value      {fmt_kes(p['holdings_value'])}\n"
-        f"  Benchmark           {fmt_kes(p['benchmark_value'])}  "
-        f"({fmt_pct(p['benchmark_return_pct'])})"
-    )
+    lines = [
+        f"  Initial Capital     {fmt_kes(p['initial_capital'])}",
+        f"  Current Value       {fmt_kes(p['total_value'])}",
+        f"  Total Return        {fmt_pct(p['total_return_pct'])}",
+    ]
+    if isinstance(p.get("max_drawdown_pct"), (int, float)):
+        lines.append(f"  Max Drawdown        {p['max_drawdown_pct']:+.2f}%")
+    lines += [
+        f"  Cash                {fmt_kes(p['cash'])}",
+        f"  Holdings Value      {fmt_kes(p['holdings_value'])}",
+        f"  As of               {p.get('as_of')}  (prices {p.get('price_date')})",
+        f"  Valuation basis     {p.get('valuation_basis')}",
+    ]
+    if comparison.get("comparison_status") == "comparable":
+        lines.append(
+            f"  Benchmark           {fmt_kes(comparison['benchmark']['value'])}  "
+            f"({fmt_pct(comparison['benchmark']['return_pct'])})"
+        )
+    else:
+        from ...services.benchmark_compare import reason_summary
+        lines.append(
+            "  Benchmark           INCOMPARABLE — " + reason_summary(comparison)
+        )
+    return "\n".join(lines)
 
 
 def _format_positions_table(rows: list[dict[str, Any]], console: Optional[Console] = None) -> None:
+    def num(v: Any, fmt: str) -> str:
+        return format(v, fmt) if isinstance(v, (int, float)) else "—"
+
     t = Table(show_header=True, header_style="bold", title="POSITIONS")
     t.add_column("Symbol")
     t.add_column("Shares", justify="right")
@@ -204,15 +262,17 @@ def _format_positions_table(rows: list[dict[str, Any]], console: Optional[Consol
     t.add_column("Value (KES)", justify="right")
     t.add_column("P&L (KES)", justify="right")
     t.add_column("P&L %", justify="right")
+    t.add_column("Price src")
     for r in rows:
         t.add_row(
             r["symbol"],
             f"{r['shares']}",
-            f"{r['avg_cost']:.2f}",
-            f"{r['last_price']:.2f}",
-            f"{r['value']:,.2f}",
-            f"{r['pnl']:+,.2f}",
-            f"{r['pnl_pct']:+.2f}%",
+            num(r.get("avg_cost"), ".2f"),
+            num(r.get("last_price"), ".2f"),
+            num(r.get("value"), ",.2f"),
+            num(r.get("pnl"), "+,.2f"),
+            num(r.get("pnl_pct"), "+.2f"),
+            str(r.get("price_source") or "—"),
         )
     (console or Console()).print(t)
 
