@@ -49,10 +49,12 @@ from pathlib import Path
 from typing import Any, Optional
 
 from ..price_source import resolve_prices
+from . import benchmark_eqw_v2 as eqw_v2
 from . import portfolio_status as pf_status
 
 # Stage-1 gate configuration (NOT changed by TP-005 — reported, not redefined).
 GATE_DEADLINE = "2026-11-04"
+MAX_DRAWDOWN_HALT_PCT = 15.0
 
 # The benchmark basket recorded in portfolio/benchmark.json predates this
 # module and carries no version field, so its universe is labelled explicitly
@@ -73,6 +75,34 @@ DEFAULT_COST_POLICY: dict[str, Any] = {
 # A book or a benchmark record older than this cannot be compared without
 # pretending the missing days did not happen.
 DEFAULT_MAX_AGE_DAYS = 3
+
+# When the comparison is sourced from the versioned eqw-v2 record, BOTH sides
+# are already net of their modelled costs: the paper book through the engine's
+# trade-cost model, the benchmark through the entry cost recorded in the
+# eqw-v2 record. No further round-trip charge is applied, so the published gap
+# is directly the pre-registered rule's "strategy net return vs benchmark net
+# return" (audit/stage1-gate-preregistration-2026-09-15.md).
+V2_COST_POLICY: dict[str, Any] = {
+    "strategy_round_trip_cost_pct": 0.0,
+    "benchmark_round_trip_cost_pct": 0.0,
+    "gate_basis": (
+        "both sides net — canonical book (engine trade-cost model applied) vs "
+        "eqw-v2 (recorded one-time entry cost applied)"
+    ),
+    "declared": True,
+    "benchmark_source": eqw_v2.VERSION,
+}
+
+# Reason codes that describe the LEGACY benchmark record's fitness rather than
+# the comparability of the valuation. With a covered eqw-v2 record driving the
+# verdict these are demoted to the ``legacy_benchmark`` block (reported for
+# continuity, never silently dropped) instead of blocking the gate.
+LEGACY_BENCHMARK_REASON_CODES = frozenset({
+    "benchmark_unavailable",
+    "benchmark_has_no_snapshots",
+    "benchmark_record_stale",
+    "benchmark_snapshot_value_unreadable",
+})
 
 
 def benchmark_path(dir_path: Optional[str] = None) -> Path:
@@ -126,6 +156,77 @@ def _reason(code: str, **fields: Any) -> dict[str, Any]:
     return {"code": code, "detail": f"{code}({detail})" if detail else code, **fields}
 
 
+def stage1_rule_block(
+    *,
+    strategy_return_pct: Optional[float],
+    benchmark_return_pct: Optional[float],
+    gap_net_pct: Optional[float],
+    window_sessions: int,
+    minimum_window_sessions: int = eqw_v2.MIN_WINDOW_SESSIONS,
+    drawdown_pct: Optional[float] = None,
+    mandate_return_pct: Optional[float] = None,
+) -> dict[str, Any]:
+    """Expose each pre-registered rule clause with its inputs and PASS/FAIL.
+
+    DATA ONLY — the rule itself lives in
+    ``audit/stage1-gate-preregistration-2026-09-15.md`` and is evaluated there
+    by a human/verdict layer. A verdict that cannot show its inputs is invalid,
+    so everything the rule needs is exposed here: window session count, strategy
+    net return, both benchmark net returns, max drawdown, and per-clause results.
+    """
+    window_ok = window_sessions >= minimum_window_sessions
+
+    def clause(ok: Optional[bool], **fields: Any) -> dict[str, Any]:
+        return {"pass": ok, **fields}
+
+    clauses = {
+        "window_minimum_met": clause(
+            window_ok,
+            window_sessions=window_sessions,
+            minimum_window_sessions=minimum_window_sessions,
+        ),
+        "strategy_net_return_ge_zero": clause(
+            None if strategy_return_pct is None else strategy_return_pct >= 0.0,
+            value_pct=strategy_return_pct,
+        ),
+        "strategy_beats_eqw_v2_held": clause(
+            None if gap_net_pct is None else gap_net_pct >= 0.0,
+            gap_net_pct=gap_net_pct,
+            strategy_return_pct=strategy_return_pct,
+            benchmark_return_pct=benchmark_return_pct,
+        ),
+        "max_drawdown_below_limit": clause(
+            None if drawdown_pct is None else drawdown_pct < MAX_DRAWDOWN_HALT_PCT,
+            value_pct=drawdown_pct,
+            limit_pct=MAX_DRAWDOWN_HALT_PCT,
+        ),
+    }
+    values = [c["pass"] for c in clauses.values()]
+    if not window_ok:
+        outcome = "INSUFFICIENT_WINDOW"
+    elif all(v is True for v in values):
+        outcome = "GO"
+    elif any(v is False for v in values):
+        outcome = "NO-GO"
+    else:
+        outcome = "UNRESOLVED"
+    return {
+        "rule_source": "audit/stage1-gate-preregistration-2026-09-15.md",
+        "benchmark_used": "%s-%s" % (eqw_v2.VERSION, eqw_v2.HELD_KEY),
+        "mandate_role": "context only (does not gate)",
+        "window_sessions": window_sessions,
+        "minimum_window_sessions": minimum_window_sessions,
+        "strategy_net_return_pct": strategy_return_pct,
+        "benchmark_net_return_pct": benchmark_return_pct,
+        "mandate_net_return_pct": mandate_return_pct,
+        "max_drawdown_pct": drawdown_pct,
+        "clauses": clauses,
+        "outcome_if_evaluated_now": outcome,
+        "note": "inputs exposed for the pre-registered rule; the verdict is not "
+                "implemented in code",
+    }
+
+
 def recompute_equal_weight_benchmark(
     benchmark: dict[str, Any],
     universe: list[str],
@@ -176,6 +277,9 @@ def compare(
     as_of: Any = None,
     cost_policy: Optional[dict[str, Any]] = None,
     max_age_days: int = DEFAULT_MAX_AGE_DAYS,
+    benchmark_v2: Optional[dict[str, Any]] = None,
+    snapshots: Optional[list[dict[str, Any]]] = None,
+    min_window_sessions: int = eqw_v2.MIN_WINDOW_SESSIONS,
 ) -> dict[str, Any]:
     """Compare the canonical book against the benchmark, or refuse to.
 
@@ -185,9 +289,19 @@ def compare(
     cash/cost policy. Otherwise it is ``"incomparable"``, ``reasons`` carries
     why, and the gap fields are ``None``.
 
-    Injection points (``portfolio_status`` / ``benchmark`` / ``eligible_universe``
-    / ``as_of``) exist so tests can use deterministic fixtures without touching
-    runtime state.
+    Benchmark side (Task 6): when the versioned
+    ``portfolio/benchmark_eqw_v2.json`` record exists AND has a snapshot at the
+    valuation date, IT is the benchmark for the verdict
+    (``benchmark_source == "eqw-v2"``) and the legacy record's own defects are
+    demoted into ``legacy_benchmark`` instead of blocking. A v2 window shorter
+    than ``min_window_sessions`` (default 20, the pre-registered minimum)
+    surfaces as the machine-readable reason ``window_below_minimum``; the rule
+    itself is NOT implemented here. ``stage1_rule`` exposes each clause's input
+    and PASS/FAIL so a verdict can show its work.
+
+    Injection points (``portfolio_status`` / ``benchmark`` / ``benchmark_v2`` /
+    ``eligible_universe`` / ``snapshots`` / ``as_of``) exist so tests can use
+    deterministic fixtures without touching runtime state.
     """
     cost = dict(DEFAULT_COST_POLICY)
     if cost_policy:
@@ -272,8 +386,31 @@ def compare(
                 )
             )
 
+    # ── eqw-v2 versioned benchmark (Task 6) ───────────────────────────────
+    # The versioned record is the pre-registered rule's benchmark. It is used
+    # for the verdict when it EXISTS and COVERS the valuation date; the legacy
+    # record is still read, reported and (when nothing else is available) used,
+    # so its append-only history keeps its continuity role.
+    v2_record = (
+        benchmark_v2 if benchmark_v2 is not None else eqw_v2.load_record(dir_path)
+    )
+    v2 = (
+        eqw_v2.assess(v2_record, as_of_date, min_sessions=min_window_sessions)
+        if v2_record
+        else None
+    )
+    v2_benchmarks = (v2 or {}).get("benchmarks") or {}
+    v2_held = v2_benchmarks.get(eqw_v2.HELD_KEY) or {}
+    v2_mandate = v2_benchmarks.get(eqw_v2.MANDATE_KEY) or {}
+    use_v2 = bool(v2 and v2.get("covers_valuation_date"))
+    v2_universe = sorted(
+        set(v2_held.get("universe") or []) | set(v2_mandate.get("universe") or [])
+    )
+
     # ── same resolver, anchored at the same as-of date ────────────────────
-    recompute_universe = bm_universe or pf_symbols
+    recompute_universe = sorted(set(bm_universe) | set(pf_symbols) | set(v2_universe))
+    if not recompute_universe:
+        recompute_universe = list(pf_symbols)
     res = resolve_prices(recompute_universe, dir_path, as_of=as_of_date)
     recomputed = (
         recompute_equal_weight_benchmark(
@@ -283,10 +420,61 @@ def compare(
         else None
     )
 
-    required = sorted(set(pf_symbols) | set(bm_universe))
+    required = sorted(set(pf_symbols) | set(bm_universe) | set(v2_universe))
     unpriced = [s for s in required if not res.prices.get(s)]
     if unpriced:
         reasons.append(_reason("unpriced_symbols", symbols=unpriced))
+
+    # ── benchmark sourcing + reason routing (eqw-v2 vs legacy) ────────────
+    # A covered eqw-v2 record drives the verdict. The legacy record's own
+    # defects (stale snapshot, legacy-basket universe mismatch) are about the
+    # OLD basket, so they are then demoted into ``legacy_benchmark`` — reported,
+    # never silently dropped — instead of blocking a comparison that no longer
+    # depends on them. Portfolio-side and resolver-side reasons always block.
+    legacy_reasons: list[dict[str, Any]] = []
+    if use_v2:
+        legacy_reasons = [
+            r for r in reasons
+            if r["code"] in LEGACY_BENCHMARK_REASON_CODES
+            or r["code"] == "unpriced_symbols"   # re-derived below over the live/v2 sets
+            or (
+                r["code"] == "universe_mismatch"
+                and r.get("benchmark_universe_version") == BENCHMARK_UNIVERSE_VERSION_LEGACY
+            )
+        ]
+        reasons = [r for r in reasons if r not in legacy_reasons]
+        reasons.extend((v2 or {}).get("reasons") or [])
+        # An unpriced LEGACY-only symbol (e.g. EUR/USD in the old basket) no
+        # longer blocks; an unpriced name in the live book or in a v2 universe
+        # still does.
+        still_required = sorted(set(pf_symbols) | set(v2_universe))
+        blocking_unpriced = [s for s in still_required if not res.prices.get(s)]
+        if blocking_unpriced:
+            reasons.append(_reason("unpriced_symbols", symbols=blocking_unpriced))
+        v2_eligible = sorted(v2_held.get("universe") or [])
+        v2_extra = sorted(set(v2_eligible) - set(pf_symbols))
+        v2_missing = sorted(set(pf_symbols) - set(v2_eligible))
+        if v2_extra or v2_missing:
+            universe_mismatch = True
+            reasons.append(
+                _reason(
+                    "universe_mismatch",
+                    benchmark_universe_version="%s-%s" % (eqw_v2.VERSION, eqw_v2.HELD_KEY),
+                    not_in_portfolio=v2_extra,
+                    not_in_benchmark=v2_missing,
+                    benchmark_size=len(v2_eligible),
+                    portfolio_size=len(pf_symbols),
+                )
+            )
+        v2_unpriced = sorted(
+            set(v2_held.get("unpriced") or []) | set(v2_mandate.get("unpriced") or [])
+        )
+        if v2_unpriced:
+            reasons.append(
+                _reason("eqw_v2_unpriced_symbols", symbols=v2_unpriced)
+            )
+    elif v2:
+        reasons.extend((v2 or {}).get("reasons") or [])
 
     # ── declared cash / initial capital ───────────────────────────────────
     pf_capital = pf.get("initial_capital")
@@ -317,16 +505,29 @@ def compare(
     }
 
     # The gate is measured against the RECORDED benchmark snapshot for the
-    # same as-of date. A recomputed value is reported for cross-check only:
-    # the benchmark history is evidence and is never silently replaced.
+    # same as-of date — the eqw-v2 row when it covers the date, else the legacy
+    # record. A recomputed value is reported for cross-check only: the
+    # benchmark history is evidence and is never silently replaced.
     basis: Optional[str] = None
     bm_value: Optional[float] = None
-    if bm_last is not None and bm_last_date is not None and bm_last_date == as_of_date:
+    benchmark_source = "eqw-v1-legacy"
+    if use_v2 and as_of_date is not None:
+        bm_value = v2_held.get("value")
+        basis = "eqw_v2_recorded_snapshot_at_as_of"
+        benchmark_source = eqw_v2.VERSION
+    elif bm_last is not None and bm_last_date is not None and bm_last_date == as_of_date:
         bm_value = bm_last_value
         basis = "recorded_snapshot_at_as_of"
     elif recomputed is not None:
         bm_value = None
         basis = "no_recorded_snapshot_at_as_of"
+
+    # Both sides are already net of their modelled costs under eqw-v2, so no
+    # extra round-trip charge is applied (the caller's policy, when given,
+    # still wins).
+    if use_v2 and not cost_policy:
+        cost = dict(DEFAULT_COST_POLICY)
+        cost.update(V2_COST_POLICY)
 
     comparable = not reasons and pf_value is not None and bm_value is not None
 
@@ -344,7 +545,11 @@ def compare(
         "benchmark_age_days": benchmark_age_days,
         "universe_mismatch": universe_mismatch,
         "benchmark_basis": basis,
-        "benchmark_snapshot_date": bm_last_date.isoformat() if bm_last_date else None,
+        "benchmark_source": benchmark_source,
+        "benchmark_snapshot_date": (
+            v2_held.get("snapshot_date") if use_v2
+            else (bm_last_date.isoformat() if bm_last_date else None)
+        ),
         "cost_policy": cost,
         "cash_policy": cash_policy,
         "resolver": res.provenance(),
@@ -394,6 +599,47 @@ def compare(
         payload["gap_net_pct"] = round(net, 4)
         payload["gate_ok"] = bool(net >= 0)
         payload["verdict"] = "ON TRACK" if payload["gate_ok"] else "BEHIND GATE"
+
+    # ── continuity + rule inputs ──────────────────────────────────────────
+    payload["benchmark"]["source"] = benchmark_source
+    payload["benchmark"]["version"] = eqw_v2.VERSION if use_v2 else bm_version
+    payload["benchmark"]["init_date"] = (
+        (v2_record or {}).get("init_date") if use_v2 else bm.get("init_date") if bm else None
+    )
+    payload["benchmark_v2"] = v2
+    payload["legacy_benchmark"] = {
+        "universe_version": bm_version,
+        "universe": sorted(bm_universe),
+        "recorded_value": bm_last_value,
+        "recorded_date": bm_last_date.isoformat() if bm_last_date else None,
+        "recomputed_value": recomputed.get("value") if recomputed else None,
+        "reported_reasons": legacy_reasons,
+        "demoted_from_verdict": bool(use_v2),
+        "role": (
+            "continuity only — append-only history preserved, not the gate benchmark"
+            if use_v2 else "verdict source (no covered eqw-v2 record)"
+        ),
+    }
+    if use_v2 and v2 is not None:
+        drawdown = eqw_v2.strategy_max_drawdown(
+            dir_path,
+            start=(v2_record or {}).get("init_date"),
+            end=as_of_date,
+            snapshots=snapshots,
+        )
+        payload["strategy_drawdown"] = drawdown
+        payload["stage1_rule"] = stage1_rule_block(
+            strategy_return_pct=payload["portfolio"]["return_pct"],
+            benchmark_return_pct=payload["benchmark"]["return_pct"],
+            gap_net_pct=payload["gap_net_pct"],
+            window_sessions=int(v2.get("window_sessions") or 0),
+            minimum_window_sessions=int(v2.get("minimum_window_sessions") or min_window_sessions),
+            drawdown_pct=drawdown.get("max_drawdown_pct"),
+            mandate_return_pct=(v2_benchmarks.get(eqw_v2.MANDATE_KEY) or {}).get("return_pct"),
+        )
+    else:
+        payload["strategy_drawdown"] = None
+        payload["stage1_rule"] = None
     return payload
 
 
@@ -405,11 +651,54 @@ def reason_summary(cmp: dict[str, Any]) -> str:
     for r in cmp.get("reasons") or []:
         if r["code"] == "benchmark_record_stale":
             codes.append(f"benchmark_age_days={r.get('benchmark_age_days')}")
+        elif r["code"] == "window_below_minimum":
+            codes.append(
+                "window_below_minimum=%s/%s"
+                % (r.get("window_sessions"), r.get("minimum_window_sessions"))
+            )
         elif r["code"] == "universe_mismatch":
             codes.append("universe_mismatch")
         else:
             codes.append(str(r["code"]))
     return ", ".join(codes) if codes else "unknown"
+
+
+def _v2_lines(cmp: dict[str, Any]) -> list[str]:
+    """Benchmark-v2 evidence lines (versioned record), when present."""
+    v2 = cmp.get("benchmark_v2") or {}
+    if not v2.get("available"):
+        return []
+    lines = [
+        "  Benchmark:    eqw-v2 (record %s, init %s, window %s/%s sessions)"
+        % (v2.get("version"), v2.get("init_date"), v2.get("window_sessions"),
+           v2.get("minimum_window_sessions"))
+    ]
+    for key in (eqw_v2.HELD_KEY, eqw_v2.MANDATE_KEY):
+        b = (v2.get("benchmarks") or {}).get(key) or {}
+        lines.append(
+            "    eqw-v2-%s: unmoved_value=%s net_return=%s%% (last %s)"
+            % (key, b.get("value"), b.get("return_pct"), b.get("snapshot_date"))
+        )
+        for e in b.get("excluded") or []:
+            lines.append(
+                "      excluded: %s (%s)" % (e.get("symbol"), e.get("reason"))
+            )
+    rule = cmp.get("stage1_rule") or {}
+    if rule:
+        clauses = rule.get("clauses") or {}
+        lines.append(
+            "  Rule inputs:  strategy_net=%s%%  eqw-v2-held_net=%s%%  "
+            "mandate_net=%s%%  max_dd=%s%%"
+            % (rule.get("strategy_net_return_pct"), rule.get("benchmark_net_return_pct"),
+               rule.get("mandate_net_return_pct"), rule.get("max_drawdown_pct"))
+        )
+        for name, c in clauses.items():
+            mark = {True: "PASS", False: "FAIL", None: "UNKNOWN"}[c.get("pass")]
+            lines.append("    %-28s %s" % (name, mark))
+        lines.append(
+            "  Rule outcome (if evaluated now): %s" % rule.get("outcome_if_evaluated_now")
+        )
+    return lines
 
 
 def format_comparison(cmp: dict[str, Any]) -> list[str]:
@@ -428,6 +717,7 @@ def format_comparison(cmp: dict[str, Any]) -> list[str]:
                 % (bm.get("recorded_value"), bm.get("recorded_date"),
                    cmp.get("benchmark_universe_version"))
             )
+        lines.extend(_v2_lines(cmp))
         lines.append(
             "  no gap is published from a mismatched date/universe"
         )
@@ -447,13 +737,15 @@ def format_comparison(cmp: dict[str, Any]) -> list[str]:
         % (p["return_pct"], f"{p['value']:,.2f}")
     )
     lines.append(
-        "  Benchmark:    %+.2f%%  (KES %s @ %s)"
-        % (b["return_pct"], f"{b['value']:,.2f}", b.get("recorded_date"))
+        "  Benchmark:    %+.2f%%  (KES %s @ %s) [%s]"
+        % (b["return_pct"], f"{b['value']:,.2f}", b.get("recorded_date"),
+           cmp.get("benchmark_source"))
     )
     lines.append(
         "  Gap (gross):  %+.2f%%   net of declared costs: %+.2f%%"
         % (cmp["gap_gross_pct"], cmp["gap_net_pct"])
     )
+    lines.extend(_v2_lines(cmp))
     lines.append(
         "  Verdict:      %s   deadline %s"
         % ("ON TRACK" if cmp.get("gate_ok") else "BEHIND GATE", cmp.get("gate_deadline"))
