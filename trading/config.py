@@ -283,6 +283,10 @@ EXECUTION_CONFIG: dict[str, Any] = {
         "energy":    {"warn": 25.0, "hard": 30.0},
         "insurance": {"warn": 20.0, "hard": 25.0},
         "consumer":  {"warn": 20.0, "hard": 25.0},
+        # Task 7 (2026-09-15): services was unlisted, so WTK (a held orphan
+        # outside STRATEGY targets) fell to the flat max_sector_exposure_pct
+        # default (25/25). Sized at the "other" tier — TIGHTENING only.
+        "services":  {"warn": 15.0, "hard": 20.0},
         "other":     {"warn": 15.0, "hard": 20.0},
     },
     # Momentum gate: when a sector is over its HARD cap BUT still trending up
@@ -440,6 +444,16 @@ def ensure_dirs() -> None:
 # or via momentum_gate.max_staleness_days.
 MOMENTUM_MAX_STALENESS_DAYS: int = 7
 
+# Task 7 (2026-09-15) — member-coverage / evidence-quality gate. A sector may
+# only earn the momentum uplift when at least this many members hold valid,
+# fresh price evidence: one fresh CSV is a single print, not a sector trend.
+# Absent members (e.g. BRIT, which has no cached CSV and is not even held) are
+# now SKIPPED and recorded with state "missing" instead of marking the whole
+# sector unusable, so a held sector (insurance: KNRE) can still earn its uplift
+# from the evidence that exists. Malformed/stale members block only themselves.
+# No cap, threshold, lookback or uplift size is changed by this constant.
+MOMENTUM_MIN_VALID_MEMBERS: int = 2
+
 _CSV_DATE_KEYS = ("date", "Date", "DATE", "timestamp", "time", "as_of")
 
 # Diagnostics that must reach a human/operator instead of being swallowed.
@@ -511,13 +525,19 @@ def sector_momentum_diagnostics(
     """Explain WHY the sector momentum uplift did or did not apply. Read-only.
 
     Returns a dict carrying ``applied`` (bool), a machine-readable ``reason``,
-    ``blocking`` (the data problems found, if any) and the per-member price
-    evidence behind the decision, so missing / unreadable / malformed / stale
-    input is inspectable rather than silently disabling the gate.
+    ``skipped_members`` / ``skipped_states`` (member data problems — recorded,
+    NOT sector-fatal), ``valid_members`` / ``min_valid_members`` (coverage) and
+    the per-member price evidence behind the decision, so missing / unreadable /
+    malformed / stale input is inspectable rather than silently disabling the
+    gate.
 
-    Conservative by construction: any member that is missing, unreadable,
-    malformed, future-dated or stale blocks the uplift for the whole sector. A
-    path-type error in ``data_dir`` raises TypeError instead of being swallowed.
+    Availability-first (Task 7): a member that is missing, unreadable,
+    malformed, future-dated or stale is SKIPPED — it is dropped from the sector
+    average and recorded in ``members`` with its state — instead of disabling the
+    uplift for the whole sector. The uplift is withheld only when fewer than
+    ``MOMENTUM_MIN_VALID_MEMBERS`` members have valid fresh data (reason
+    ``insufficient_member_coverage``). A path-type error in ``data_dir`` raises
+    TypeError instead of being swallowed.
     """
     resolved_upto = _as_date(now)
 
@@ -527,6 +547,10 @@ def sector_momentum_diagnostics(
             "applied": False,
             "reason": reason,
             "detail": detail,
+            "skipped_members": [],
+            "skipped_states": [],
+            "valid_members": 0,
+            "min_valid_members": MOMENTUM_MIN_VALID_MEMBERS,
             "blocking": [],
             "uplift_pct": None,
             "effective_hard_uplift": 0.0,
@@ -575,7 +599,10 @@ def sector_momentum_diagnostics(
     members = [s for s, sec in SECTOR_MAP.items() if sec == sector]
     per_member: list[dict] = []
     returns: list[float] = []
-    blocking: list[str] = []
+    # Members dropped from the sector average (missing / unreadable / malformed /
+    # stale / future-dated). Informational: coverage, not a single member, is
+    # what decides whether the uplift may apply.
+    skipped: list[str] = []
 
     for sym in members:
         path = root / f"nse_{sym}.csv"
@@ -583,6 +610,7 @@ def sector_momentum_diagnostics(
             "symbol": sym,
             "path": str(path),
             "state": "ok",
+            "counted": False,
             "rows": 0,
             "window_rows": 0,
             "date_source": None,
@@ -593,7 +621,7 @@ def sector_momentum_diagnostics(
         }
         if not path.exists():
             entry.update(state="missing", detail="no cached CSV for this symbol")
-            blocking.append("missing")
+            skipped.append(sym)
             per_member.append(entry)
             continue
         try:
@@ -601,14 +629,14 @@ def sector_momentum_diagnostics(
                 rows = list(csv.DictReader(fh))
         except (OSError, UnicodeDecodeError, csv.Error) as exc:
             entry.update(state="unreadable", detail=f"{type(exc).__name__}: {exc}")
-            blocking.append("unreadable")
+            skipped.append(sym)
             per_member.append(entry)
             continue
 
         entry["rows"] = len(rows)
         if len(rows) < 2:
             entry.update(state="malformed", detail=f"needs >= 2 rows, found {len(rows)}")
-            blocking.append("malformed")
+            skipped.append(sym)
             per_member.append(entry)
             continue
 
@@ -618,14 +646,14 @@ def sector_momentum_diagnostics(
         prev_close = _row_close(rows[-window])
         if last_close is None or prev_close is None:
             entry.update(state="malformed", detail="close column missing or unparseable")
-            blocking.append("malformed")
+            skipped.append(sym)
             per_member.append(entry)
             continue
 
         session_date, date_state = _row_date(rows[-1])
         if date_state == "malformed":
             entry.update(state="malformed", detail="date column present but unparseable")
-            blocking.append("malformed")
+            skipped.append(sym)
             per_member.append(entry)
             continue
         if date_state == "no_date_column":
@@ -633,7 +661,7 @@ def sector_momentum_diagnostics(
                 session_date = datetime.fromtimestamp(path.stat().st_mtime).date()
             except OSError as exc:
                 entry.update(state="unreadable", detail=f"stat failed: {exc}")
-                blocking.append("unreadable")
+                skipped.append(sym)
                 per_member.append(entry)
                 continue
             entry["date_source"] = "mtime"
@@ -645,7 +673,7 @@ def sector_momentum_diagnostics(
         entry["staleness_days"] = staleness
         if staleness < 0:
             entry.update(state="malformed", detail=f"last session {session_date} is dated in the future")
-            blocking.append("malformed")
+            skipped.append(sym)
             per_member.append(entry)
             continue
         if staleness > max_age:
@@ -653,12 +681,13 @@ def sector_momentum_diagnostics(
                 state="stale",
                 detail=f"last session {session_date} is {staleness}d old (max {max_age}d)",
             )
-            blocking.append("stale")
+            skipped.append(sym)
             per_member.append(entry)
             continue
 
         ret_pct = (last_close - prev_close) / prev_close * 100.0
         entry["return_pct"] = round(ret_pct, 4)
+        entry["counted"] = True
         per_member.append(entry)
         returns.append(ret_pct)
 
@@ -667,7 +696,15 @@ def sector_momentum_diagnostics(
         "applied": False,
         "reason": None,
         "detail": "",
-        "blocking": sorted(set(blocking)),
+        # Per-member data problems: recorded for the operator, no longer fatal.
+        "skipped_members": skipped,
+        "skipped_states": sorted({e["state"] for e in per_member if e["state"] != "ok"}),
+        "valid_members": len(returns),
+        "min_valid_members": MOMENTUM_MIN_VALID_MEMBERS,
+        # Gate-level reasons the uplift could not apply at all (bad config,
+        # insufficient member coverage). Empty when the gate decided on market
+        # evidence, either way.
+        "blocking": [],
         "uplift_pct": uplift,
         "effective_hard_uplift": 0.0,
         "lookback_days": lookback,
@@ -681,11 +718,18 @@ def sector_momentum_diagnostics(
 
     if not members:
         diag.update(reason="no_members", detail=f"no sector members configured for {sector!r}")
-    elif blocking:
+    elif len(returns) < MOMENTUM_MIN_VALID_MEMBERS:
+        skipped_detail = ", ".join(
+            f"{e['symbol']}={e['state']}" for e in per_member if e["state"] != "ok"
+        )
         diag.update(
-            reason="data_unusable",
-            detail="no uplift — unusable price evidence: "
-            + ", ".join(f"{e['symbol']}={e['state']}" for e in per_member if e["state"] != "ok"),
+            reason="insufficient_member_coverage",
+            blocking=["insufficient_member_coverage"],
+            detail=(
+                f"{sector} has {len(returns)} member(s) with valid fresh price data "
+                f"(min {MOMENTUM_MIN_VALID_MEMBERS}) — no uplift"
+                + (f"; skipped: {skipped_detail}" if skipped_detail else "")
+            ),
         )
     else:
         avg = sum(returns) / len(returns)
@@ -709,7 +753,7 @@ def sector_momentum_diagnostics(
                 ),
             )
 
-    if diag["reason"] == "data_unusable":
+    if diag["reason"] == "insufficient_member_coverage":
         warnings.warn(
             f"sector momentum uplift disabled for {sector!r}: {diag['detail']}",
             RuntimeWarning,
@@ -725,8 +769,9 @@ def sector_cap(sector: str, *, data_dir=None, now=None, max_staleness_days: Opti
     The momentum gate raises HARD by ``hard_uplift_pct`` (exactly once) when the
     sector's average return over ``lookback_days`` is >= ``momentum_min_pct``,
     so winning sectors are NOT force-trimmed at HARD. Reads price history from
-    ``<DATA_DIR>/nse_<SYM>.csv``; every member must exist, be readable, be
-    well-formed and be fresh, otherwise no uplift (conservative).
+    ``<DATA_DIR>/nse_<SYM>.csv``; members without valid fresh data (missing,
+    unreadable, malformed, stale) are skipped and the uplift requires at least
+    ``MOMENTUM_MIN_VALID_MEMBERS`` members with valid fresh data.
 
     ``data_dir`` / ``now`` / ``max_staleness_days`` exist for deterministic
     testing and inspection; production callers use the defaults. Call

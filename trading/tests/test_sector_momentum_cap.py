@@ -7,6 +7,13 @@ temporary directory and ``now`` is pinned, so nothing here depends on the live
 Defect this pins down (found 2026-09-15): ``DATA_DIR`` is a ``str``, so
 ``DATA_DIR / f"nse_{sym}.csv"`` raised TypeError inside a broad
 ``except Exception: pass`` — the momentum uplift never applied and said nothing.
+
+Task 7 (2026-09-15) update: member data states (missing / unreadable / malformed
+/ stale) are no longer sector-fatal. A member is SKIPPED and the uplift is
+withheld only when fewer than ``config.MOMENTUM_MIN_VALID_MEMBERS`` members have
+valid fresh data (reason ``insufficient_member_coverage``). The assertions below
+were updated to that contract; Task 7 coverage lives in
+``test_task7_risk_input_hygiene.py``.
 """
 import csv
 import os
@@ -133,13 +140,16 @@ def test_missing_csv_applies_no_uplift_and_warns(tmp_path):
 
     assert cap == {"warn": BASE_WARN, "hard": BASE_HARD}
     assert diag["applied"] is False
-    assert diag["reason"] == "data_unusable"
-    assert "missing" in diag["blocking"]
+    # Task 7: member problems are recorded, not fatal — coverage (0 of N) is why
+    # the uplift is withheld here.
+    assert diag["reason"] == "insufficient_member_coverage"
+    assert "missing" in diag["skipped_states"]
     assert all(m["state"] == "missing" for m in diag["members"])
     assert "missing" in diag["detail"]
 
 
-def test_malformed_csv_applies_no_uplift_and_warns(tmp_path):
+def test_malformed_member_is_skipped_and_remaining_members_grant_uplift(tmp_path):
+    """Task 7: a malformed member blocks only itself, not the whole sector."""
     today = date(2026, 9, 15)
     _seed(tmp_path, _rising(LOOKBACK + 5), today)
     # Corrupt one member: a header with no close-like column at all.
@@ -149,20 +159,21 @@ def test_malformed_csv_applies_no_uplift_and_warns(tmp_path):
         writer.writerow(["date", "notes"])
         writer.writerow([today.isoformat(), "no price here"])
 
-    with pytest.warns(RuntimeWarning, match="momentum uplift disabled"):
-        cap = config.sector_cap(SECTOR, data_dir=tmp_path, now=today)
     diag = config.sector_momentum_diagnostics(SECTOR, data_dir=tmp_path, now=today)
 
-    assert cap == {"warn": BASE_WARN, "hard": BASE_HARD}
-    assert diag["applied"] is False
-    assert diag["reason"] == "data_unusable"
-    assert "malformed" in diag["blocking"]
     states = {m["symbol"]: m["state"] for m in diag["members"]}
     assert states[MEMBERS[0]] == "malformed"
-    assert MEMBERS[0] in diag["detail"]
+    assert MEMBERS[0] in diag["skipped_members"]
+    assert MEMBERS[0] not in [m["symbol"] for m in diag["members"] if m["counted"]]
+    assert diag["valid_members"] == len(MEMBERS) - 1
+    assert diag["applied"] is True
+    assert diag["reason"] == "uplift_applied"
+    assert config.sector_cap(SECTOR, data_dir=tmp_path, now=today) == {
+        "warn": BASE_WARN, "hard": BASE_HARD + UPLIFT,
+    }
 
 
-def test_unparseable_date_column_applies_no_uplift(tmp_path):
+def test_unparseable_date_column_member_is_skipped_not_fatal(tmp_path):
     today = date(2026, 9, 15)
     _seed(tmp_path, _rising(LOOKBACK + 5), today)
     path = tmp_path / f"nse_{MEMBERS[0]}.csv"
@@ -172,13 +183,14 @@ def test_unparseable_date_column_applies_no_uplift(tmp_path):
         csv.writer(fh).writerows(rows)
 
     diag = config.sector_momentum_diagnostics(SECTOR, data_dir=tmp_path, now=today)
-    assert diag["applied"] is False
-    assert "malformed" in diag["blocking"]
+    assert "malformed" in diag["skipped_states"]
     states = {m["symbol"]: m["state"] for m in diag["members"]}
     assert states[MEMBERS[0]] == "malformed"
+    assert MEMBERS[0] in diag["skipped_members"]
+    assert diag["applied"] is True
 
 
-def test_stale_csv_applies_no_uplift_and_warns(tmp_path):
+def test_all_members_stale_applies_no_uplift_and_warns(tmp_path):
     today = date(2026, 9, 15)
     old_session = today - timedelta(days=MAX_AGE + 23)
     _seed(tmp_path, _rising(LOOKBACK + 5), old_session)
@@ -189,8 +201,9 @@ def test_stale_csv_applies_no_uplift_and_warns(tmp_path):
 
     assert cap == {"warn": BASE_WARN, "hard": BASE_HARD}
     assert diag["applied"] is False
-    assert diag["reason"] == "data_unusable"
-    assert "stale" in diag["blocking"]
+    assert diag["reason"] == "insufficient_member_coverage"
+    assert "stale" in diag["skipped_states"]
+    assert set(diag["skipped_members"]) == set(MEMBERS)
     assert all(m["state"] == "stale" for m in diag["members"])
     assert all(m["staleness_days"] > MAX_AGE for m in diag["members"])
     assert diag["members"][0]["last_date"] == _sessions(1, old_session)[0].isoformat()
@@ -210,7 +223,8 @@ def test_future_dated_csv_applies_no_uplift(tmp_path):
     _seed(tmp_path, _rising(LOOKBACK + 5), today + timedelta(days=5))
     diag = config.sector_momentum_diagnostics(SECTOR, data_dir=tmp_path, now=today)
     assert diag["applied"] is False
-    assert "malformed" in diag["blocking"]
+    assert diag["reason"] == "insufficient_member_coverage"
+    assert "malformed" in diag["skipped_states"]
 
 
 def test_dateless_csv_falls_back_to_file_mtime(tmp_path):
