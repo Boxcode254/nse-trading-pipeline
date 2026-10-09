@@ -29,11 +29,66 @@ import re
 import json
 import subprocess
 import datetime
+import urllib.request
 
 PORTFOLIO_DIR = "/home/hermes/.trading/portfolio"
 MTM_PATH = os.path.join(PORTFOLIO_DIR, "mtm_state.json")
 CACHE_DIR = "/home/hermes/.hermes/cache/documents"
 FLAG_PCT = 0.3  # material price-divergence threshold (%)
+
+# --- Direct Telegram alert path (LLM-independent) ---------------------------
+# Same pattern as book_integrity_check.py:send_alert — urllib straight to the
+# Telegram API so a real reconciliation problem reaches Emmanuel even when the
+# LLM cron layer is down. Fired on every condition that produces non-empty
+# problem output: flagged divergence, parse/permission failure, stale-PDF
+# refusal, or no-price-table (Whispers-style) refusal.
+ENV_PATH = os.path.expanduser("~/.hermes/.env")
+DEFAULT_CHAT = "293971003"
+
+
+def _load_env() -> dict:
+    env = {}
+    if os.path.exists(ENV_PATH):
+        with open(ENV_PATH) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                env[k.strip()] = v.strip().strip('"').strip("'")
+    return env
+
+
+def send_alert(title: str, body: str) -> bool:
+    env = _load_env()
+    token = os.environ.get("TELEGRAM_BOT_TOKEN") or env.get("TELEGRAM_BOT_TOKEN", "")
+    chat = os.environ.get("CRON_ALERT_CHAT_ID") or env.get("CRON_ALERT_CHAT_ID", DEFAULT_CHAT)
+    if not token:
+        print("[axys_reconcile] TELEGRAM_BOT_TOKEN not available; cannot send alert",
+              file=sys.stderr)
+        return False
+    text = f"\U0001f6a8 *AXYS Reconcile Alert*\n{title}\n\n```\n{body}\n```"
+    payload = json.dumps({
+        "chat_id": chat,
+        "text": text,
+        "parse_mode": "Markdown",
+        "disable_notification": False,
+    }).encode()
+    req = urllib.request.Request(
+        "https://api.telegram.org/bot" + token + "/sendMessage",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            if b'"ok":true' not in r.read():
+                print("[axys_reconcile] telegram returned non-ok", file=sys.stderr)
+                return False
+        return True
+    except Exception as e:  # noqa: BLE001
+        print(f"[axys_reconcile] telegram send failed: {e}", file=sys.stderr)
+        return False
 
 # Full AXYS company name (as printed in the per-share valuation tables)
 # -> my trading symbol. The valuation tables list EVERY NSE name with
@@ -257,10 +312,17 @@ def main() -> int:
                   f"   Permission denied — user '{who}' cannot access it.\n"
                   f"   Fix: run as the file owner, or place a copy under "
                   f"{INCOMING_DIR}/.")
+            send_alert("Cannot read PDF (permission denied)",
+                       f"PDF: {pdf}\nUser '{who}' cannot access it. "
+                       f"Reconcile did NOT run.")
         else:
             print("PDF extracted empty.")
             if err.strip():
                 print(f"   pdftotext stderr: {err.strip()}")
+            send_alert("PDF extracted empty",
+                       f"PDF: {os.path.basename(pdf)}\n"
+                       f"pdftotext stderr: {err.strip()[:300] or '(none)'}\n"
+                       f"Reconcile did NOT run.")
         return 2
 
     dm = re.search(r"(\d{1,2}(?:st|nd|rd|th)?\s+\w+\s+20\d{2})", text)
@@ -280,7 +342,12 @@ def main() -> int:
               f"more than 3 days old vs today ({today_iso}).\n"
               f"   Refusing to apply this PDF's prices to today's MTM.\n"
               f"   Run with --force to override (not recommended for old PDFs).")
-    out_date = report_iso if (stale and not forced) else today_iso
+        send_alert("Stale PDF refused",
+                   f"PDF: {os.path.basename(pdf)}\n"
+                   f"Report date {report_date} ({report_iso}) is >3 days old "
+                   f"vs today {today_iso}. Prices NOT applied to MTM.\n"
+                   f"Run with --force only if this is genuinely the newest close.")
+    out_date = report_iso
 
     explicit = parse_full_table(text)
     narrative = {}  # retained for completeness; full table supersedes it
@@ -294,6 +361,10 @@ def main() -> int:
               f"   This looks like an analyst-commentary report (e.g. Daily Whispers),\n"
               f"   not a Daily Market Watch price-close file. Refusing to emit a\n"
               f"   closes file. Forward the Daily_Market_Watch PDF to reconcile.")
+        send_alert("No price table in PDF",
+                   f"PDF: {os.path.basename(pdf)}\n"
+                   f"Looks like analyst commentary (Whispers-style), not a Market "
+                   f"Watch. NO closes file written, MTM unchanged.")
         return 2
 
     mtm = json.load(open(MTM_PATH))
@@ -362,6 +433,12 @@ def main() -> int:
         print(f"\u26a0\ufe0f  {len(flags)} divergence(s) flagged:")
         for f in flags:
             print(f"  - {f}")
+        send_alert(f"{len(flags)} AXYS vs MTM divergence(s) flagged",
+                   f"PDF: {os.path.basename(pdf)} \u2014 {report_date}\n" +
+                   "\n".join(f"  - {f}" for f in flags) +
+                   (f"\n\nOverride applied to MTM: {applied} position(s)."
+                    if apply_mode and not (stale and not forced)
+                    else "\n\n(NO MTM override applied on this run.)"))
     else:
         print("\u2705 All reconciled names tie out (no material divergence).")
     if apply_mode:
