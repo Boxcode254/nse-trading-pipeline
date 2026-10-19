@@ -50,11 +50,7 @@ AXYS_SEARCH_WINDOW_DAYS = 7
 STALE_WARN_MAX_DAYS = 3  # matches the other two guards' freshness standard
 
 
-def _axys_file_date(filename: str):
-    """Extract ISO date from 'axys_closes_YYYY-MM-DD.json' or None."""
-    import re
-    m = re.search(r"(\d{4}-\d{2}-\d{2})", filename or "")
-    return m.group(1) if m else None
+from trading.helpers import _axys_file_date
 
 
 def _send_stale_axys_alert(reason: str) -> None:
@@ -121,7 +117,8 @@ def _load_axys_overrides(alert: bool = True) -> tuple[frozenset[str], dict[str, 
     """
     import datetime as _dt
     try:
-        files = []
+        # Collect ALL closes files in the search window (by filename), then select by internal date
+        candidate_files = []
         # range(0, WINDOW+1) is INCLUSIVE of WINDOW days back: a file exactly
         # AXYS_SEARCH_WINDOW_DAYS old is still applied (with a stale WARN, since
         # it's > STALE_WARN_MAX_DAYS). The constant name promises "7 days"; an
@@ -130,8 +127,9 @@ def _load_axys_overrides(alert: bool = True) -> tuple[frozenset[str], dict[str, 
             d = (_dt.date.today() - _dt.timedelta(days=back)).isoformat()
             path = PORTFOLIO_DIR / f"axys_closes_{d}.json"
             if path.exists():
-                files.append(path)
-        if not files:
+                candidate_files.append(path)
+        
+        if not candidate_files:
             # No correction file anywhere in the search window: MTM reverts to
             # pure feed with NO official-close correction. Previously silent; now
             # WARN + alert so the gap is visible (like the other two guards).
@@ -145,38 +143,106 @@ def _load_axys_overrides(alert: bool = True) -> tuple[frozenset[str], dict[str, 
             if alert:
                 _send_stale_axys_alert(msg)
             return frozenset(), {}, {}
-        # Stale-but-present: newest file older than the 3-day freshness standard.
-        # We STILL apply it (within the 7-day search safety net, better than
-        # feed) but WARN + alert so nobody mistakes it for trusted forward data.
-        # Trips at 3 days idle, matching axys_reconcile.py / book_integrity_check.py;
-        # does NOT wait a full week of silent feed-only degradation.
-        _newest_iso = _axys_file_date(files[0].name)
-        if _newest_iso:
-            _age = (_dt.date.today() - _dt.date.fromisoformat(_newest_iso)).days
+        
+        # Sort files by their INTERNAL report date (not filename), oldest first
+        files_with_dates = []
+        for path in candidate_files:
+            internal_date = _axys_file_date(path.name)
+            if internal_date:
+                files_with_dates.append((path, internal_date))
+        
+        if not files_with_dates:
+            # All files are malformed (no internal date) - hard failure
+            msg = f"AXYS closes files found ({len(candidate_files)}) but none have valid internal dates"
+            print(f"[portfolio_mtm] ERROR: {msg}", file=sys.stderr)
+            if alert:
+                _send_stale_axys_alert(msg)
+            return frozenset(), {}, {}
+        
+        # Sort by internal date
+        files_with_dates.sort(key=lambda x: x[1])
+        
+        # Target session date is today (the expected date based on filename search)
+        target_date = _dt.date.today().isoformat()
+        
+        # Find exact match: file whose internal date equals target session date
+        matching_file = None
+        for path, internal_date in files_with_dates:
+            if internal_date == target_date:
+                matching_file = path
+                break
+        
+        if matching_file:
+            # Perfect match found - use this file
+            selected_file = matching_file
+            # Other files remain for prior-day reference
+            other_files = [path for path, date in files_with_dates if path != selected_file]
+        else:
+            # No exact match - this is a hard failure unless the newest file is stale
+            newest_path, newest_date = files_with_dates[-1]
+            _age = (_dt.date.today() - _dt.date.fromisoformat(newest_date)).days
+            
+            # Check if newest file is stale (>3 days old)
             if _age > STALE_WARN_MAX_DAYS:
+                # Stale but present - warn and use it (existing behavior for stale data)
                 _msg = (
-                    f"Newest AXYS official-close file is {_age} days old "
-                    f"({files[0].name}); older than the {STALE_WARN_MAX_DAYS}-day "
-                    f"freshness standard. MTM is still applying it as the best "
-                    f"available official correction, but forward data (from "
-                    f"2026-07-23) is the only fully-trusted record. Forward "
-                    f"today's Daily_Market_Watch PDF to refresh."
+                    f"No AXYS official-close file for today ({target_date}) found, "
+                    f"newest available is {_age} days old ({newest_date}). "
+                    f"MTM is applying it as the best available correction, but "
+                    f"forward data (from 2026-07-23) is the only fully-trusted record. "
+                    f"Forward today's Daily_Market_Watch PDF to refresh."
                 )
                 print(f"[portfolio_mtm] WARNING: {_msg}", file=sys.stderr)
                 if alert:
                     _send_stale_axys_alert(_msg)
-        today_data = json.loads(files[0].read_text())
+                selected_file = newest_path
+                other_files = [path for path, date in files_with_dates if path != selected_file]
+            else:
+                # Newest file is fresh but doesn't match target session - HARD FAILURE
+                msg = (
+                    f"No AXYS official-close file for session {target_date} found, "
+                    f"newest available is {newest_date} (age={_age} days). "
+                    f"Internal date mismatch with expected session date - HARD FAILURE. "
+                    f"Expected internal date: {target_date}, found: {newest_date}. "
+                    f"This indicates a late-PDF reconciliation problem. Alert sent."
+                )
+                print(f"[portfolio_mtm] ERROR: {msg}", file=sys.stderr)
+                if alert:
+                    _send_stale_axys_alert(msg)
+                return frozenset(), {}, {}
+        
+        # Stale-but-present check for the selected file (if it's not the exact match)
+        if matching_file is None:  # Only need stale check for fallback case
+            selected_date = _axys_file_date(selected_file.name)
+            if selected_date:
+                _age = (_dt.date.today() - _dt.date.fromisoformat(selected_date)).days
+                if _age > STALE_WARN_MAX_DAYS:
+                    _msg = (
+                        f"Selected AXYS official-close file is {_age} days old "
+                        f"({selected_file.name}); older than the {STALE_WARN_MAX_DAYS}-day "
+                        f"freshness standard. MTM is still applying it as the best "
+                        f"available official correction, but forward data (from "
+                        f"2026-07-23) is the only fully-trusted record. Forward "
+                        f"today's Daily_Market_Watch PDF to refresh."
+                    )
+                    print(f"[portfolio_mtm] WARNING: {_msg}", file=sys.stderr)
+                    if alert:
+                        _send_stale_axys_alert(_msg)
+        
+        # Read the selected file
+        today_data = json.loads(selected_file.read_text())
         flags = frozenset(
             r["symbol"] for r in today_data.get("rows", [])
             if "PRICE" in (r.get("flag") or "")
         )
         close_today = {k: float(v) for k, v in today_data.get("axys", {}).items()}
         close_prev: dict[str, float] = {}
-        if len(files) > 1:
-            prev_data = json.loads(files[1].read_text())
+        if len(other_files) > 0:
+            prev_data = json.loads(other_files[0].read_text())
             close_prev = {k: float(v) for k, v in prev_data.get("axys", {}).items()}
         return flags, close_today, close_prev
-    except Exception:
+    except Exception as e:
+        print(f"[portfolio_mtm] ERROR in _load_axys_overrides: {e}", file=sys.stderr)
         return frozenset(), {}, {}
 
 
