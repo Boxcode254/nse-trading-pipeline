@@ -233,6 +233,22 @@ def record_stop_exit(
     return True
 
 
+def format_exit_price(value: Any) -> str:
+    """Render a cooldown exit price for human-readable reports. Never raises.
+
+    A real int/float (bool excluded) renders as ``"KES {value:.4f}"``; any
+    other value — None, a string, a bool, anything non-numeric — renders as
+    ``"KES n/a"``. Every consumer that formats
+    ``cooldown_status()["exit_price"]`` must go through this helper: a state
+    entry without a recorded price (``exit_price`` absent or None) must show
+    "n/a", never crash the consumer with a NoneType format TypeError
+    (t_0c02fd5c) and never fabricate ``KES 0.0000``.
+    """
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return f"KES {float(value):.4f}"
+    return "KES n/a"
+
+
 def cooldown_status(
     symbol: str,
     on_date: Optional[str] = None,

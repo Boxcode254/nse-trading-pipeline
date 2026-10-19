@@ -43,6 +43,7 @@ from trading.execution.order_store import OrderStore
 from trading.execution.retry import call_with_timeout
 from trading.portfolio import engine as port_engine
 from trading import replay as replay_module
+from trading.stop_cooldown import cooldown_status, format_exit_price
 
 # === POLICY TRIPWIRE (do not remove) ===
 # News/headlines (news_store.json, Business Daily feeds, market_intel cache) are
@@ -673,6 +674,74 @@ def _format_plan_violation(v: dict) -> tuple[str, str]:
     return sym, f"[{sv}] {vtype}: {msg}"
 
 
+def _apply_cooldown_buy_filter(
+    buy_list: list[dict],
+    sell_list: list[dict],
+    report: "AutoTraderReport",
+) -> list[dict]:
+    """6b filter: drop stop-loss-cooldown and same-run stop-sell re-entries.
+
+    Used by run_auto_trade (step 6b). target_allocation already skips cooled
+    symbols at both its BUY branches, but this final filter guarantees no
+    future producer can bypass the cooldown.
+
+    Fail-CLOSED by construction (t_0c02fd5c): the skip DECISION is computed
+    first (symbol sets only, per-symbol exceptions also drop the buy), the
+    buy list is filtered, and only then are the human-readable messages
+    built — a formatting error can never leave a cooled symbol in the buy
+    list, and unknown exit prices render "KES n/a" via format_exit_price.
+    """
+    all_buys = list(buy_list)
+    stop_sells_this_run = {s["symbol"] for s in sell_list if s.get("stop_loss")}
+
+    # Phase 1 — skip decisions ONLY (no message formatting). Any failure is
+    # fail-closed: the symbol is dropped from the buy list, never kept.
+    statuses: dict[str, dict] = {}
+    cooldown_skipped: set[str] = set()
+    for b in all_buys:
+        sym = b["symbol"]
+        try:
+            cd = cooldown_status(sym)
+        except Exception as exc:  # noqa: BLE001 — fail CLOSED, not open
+            logging.warning(
+                "cooldown_status(%s) raised (%s) — dropping its buy "
+                "(fail-closed)", sym, exc,
+            )
+            cooldown_skipped.add(sym)
+            continue
+        statuses[sym] = cd
+        if cd.get("active"):
+            cooldown_skipped.add(sym)
+
+    skipped = cooldown_skipped | (stop_sells_this_run & {b["symbol"] for b in all_buys})
+    kept = [b for b in all_buys if b["symbol"] not in skipped]
+
+    # Phase 2 — messages, AFTER the buy list is already filtered. A failure
+    # here can no longer leak a cooled symbol back into the buys.
+    try:
+        for b in all_buys:
+            sym = b["symbol"]
+            if sym in cooldown_skipped:
+                cd = statuses.get(sym) or {}
+                report.add_skip(
+                    sym,
+                    f"Stop-loss re-entry cooldown: exited {cd.get('exit_date')} "
+                    f"@ {format_exit_price(cd.get('exit_price'))}; "
+                    f"{cd.get('sessions_remaining', 0)} session(s) remaining "
+                    f"(blocked until {cd.get('until')})",
+                )
+            elif sym in stop_sells_this_run:
+                report.add_skip(
+                    sym,
+                    "Stop-loss sell executing this session — re-entry blocked "
+                    "until the cooldown is recorded",
+                )
+    except Exception as exc:  # noqa: BLE001 — buys already filtered above
+        logging.warning("cooldown skip reporting failed (non-fatal): %s", exc)
+
+    return kept
+
+
 def run_auto_trade(dry_run: bool = False) -> AutoTraderReport:
     """Execute the day's allocation recommendations in the paper portfolio.
 
@@ -1078,35 +1147,10 @@ def run_auto_trade(dry_run: bool = False) -> AutoTraderReport:
     #     entry, and (b) any symbol with a stop-loss sell executing THIS
     #     session (same-run re-entry guard: the exit is recorded at fill
     #     time, after this filter runs, so the flag on sell_list is what
-    #     blocks the same-day buy-back). Fail-open: never blocks the run.
-    try:
-        from trading.stop_cooldown import cooldown_status
-
-        _stop_sells_this_run = {
-            s["symbol"] for s in sell_list if s.get("stop_loss")
-        }
-        _kept_buys: list[dict] = []
-        for b in buy_list:
-            _cd = cooldown_status(b["symbol"])
-            if _cd.get("active"):
-                report.add_skip(
-                    b["symbol"],
-                    f"Stop-loss re-entry cooldown: exited {_cd.get('exit_date')} "
-                    f"@ KES {_cd.get('exit_price', 0.0):.4f}; "
-                    f"{_cd.get('sessions_remaining', 0)} session(s) remaining "
-                    f"(blocked until {_cd.get('until')})",
-                )
-            elif b["symbol"] in _stop_sells_this_run:
-                report.add_skip(
-                    b["symbol"],
-                    "Stop-loss sell executing this session — re-entry blocked "
-                    "until the cooldown is recorded",
-                )
-            else:
-                _kept_buys.append(b)
-        buy_list = _kept_buys
-    except Exception as exc:  # noqa: BLE001 — fail-open, never block the run
-        logging.warning("stop-cooldown buy filter failed (non-fatal): %s", exc)
+    #     blocks the same-day buy-back). Fail-CLOSED: the skip decision is
+    #     computed before any message formatting, so a bad state entry can
+    #     never leave the cooled symbol in the buy list (t_0c02fd5c).
+    buy_list = _apply_cooldown_buy_filter(buy_list, sell_list, report)
 
     # 7. Execute sells first (to free cash for buys)
     # We'll use a shared ExecutionEngine for live trades (non-dry_run)

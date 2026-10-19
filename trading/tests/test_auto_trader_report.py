@@ -21,9 +21,19 @@ Two defects from the KNRE incident window:
 
 from __future__ import annotations
 
+import json
 import re
+from datetime import date
 
-from trading.auto_trader import AutoTraderReport, _format_plan_violation
+import pytest
+
+import trading.stop_cooldown as sc
+import trading.auto_trader as at
+from trading.auto_trader import (
+    AutoTraderReport,
+    _apply_cooldown_buy_filter,
+    _format_plan_violation,
+)
 
 # The exact 2026-10-16 10:31 KNRE stop-loss trade shape (from the archived
 # report + portfolio/transactions.json). add_sell(symbol, shares, price, value, reason)
@@ -159,3 +169,102 @@ def test_rendered_violation_never_ends_with_bare_colon():
         )
         # And it always renders as "[SEV] TYPE: <non-empty>"
         assert re.match(r"^\[[A-Z]+\] [A-Z_]+: \S", rendered), rendered
+
+
+# ── 3. The 6b cooldown buy filter cannot fail open (t_0c02fd5c) ─────────────
+#
+# The old inline filter formatted `cd.get('exit_price', 0.0)` inside the try,
+# with `buy_list = _kept_buys` AFTER the loop: a None exit_price raised
+# TypeError mid-loop, the except swallowed it, and the ORIGINAL buy list
+# (including the cooled symbol) survived — the KNRE re-entry passing
+# silently. _apply_cooldown_buy_filter (the real function run_auto_trade
+# calls) now decides skips first, filters the buy list, and only then
+# formats messages.
+
+@pytest.fixture
+def cooldown_state(tmp_path, monkeypatch):
+    """Isolate the cooldown state file; pin 'today' to 2026-10-19."""
+    p = tmp_path / "stop_cooldown.json"
+    monkeypatch.setattr(sc, "STATE_PATH", p)
+    monkeypatch.setattr(sc, "_today", lambda: date(2026, 10, 19))
+    return p
+
+
+def _priceless_state(path, exit_price="absent"):
+    entry = {"exit_date": "2026-10-16", "sessions": 5}
+    if exit_price != "absent":
+        entry["exit_price"] = exit_price
+    path.write_text(json.dumps({"version": 1, "entries": {"KNRE": entry}}))
+
+
+@pytest.mark.parametrize("exit_price", ["absent", None], ids=["absent", "none"])
+def test_6b_filter_drops_cooled_buy_with_priceless_entry(
+    cooldown_state, exit_price
+):
+    """Active cooldown entry with exit_price absent/None (the exact case
+    whose formatting used to raise): the cooled KNRE buy must still be
+    dropped and reported with 'n/a' — never kept, never 'KES 0.0000'."""
+    _priceless_state(cooldown_state, exit_price)
+    report = AutoTraderReport()
+    buys = [{"symbol": "KNRE", "delta_shares": 100},
+            {"symbol": "KCB", "delta_shares": 10}]
+
+    kept = _apply_cooldown_buy_filter(buys, [], report)
+
+    assert [b["symbol"] for b in kept] == ["KCB"], (
+        "cooled KNRE must be dropped from buy_list even when its exit price "
+        "cannot be formatted"
+    )
+    text = report.build()
+    assert "KNRE" in text and "n/a" in text, text
+    assert "0.0000" not in text, text
+
+
+def test_6b_filter_drops_cooled_buy_with_real_entry(cooldown_state):
+    """Normal path through the REAL filter: a properly recorded entry also
+    drops the cooled buy."""
+    sc.record_stop_exit("KNRE", "2026-10-16", 4.0639, 1802, sessions=5)
+    report = AutoTraderReport()
+    buys = [{"symbol": "KNRE", "delta_shares": 100},
+            {"symbol": "BRIT", "delta_shares": 10}]
+
+    kept = _apply_cooldown_buy_filter(buys, [], report)
+
+    assert [b["symbol"] for b in kept] == ["BRIT"]
+    text = report.build()
+    assert "2026-10-16" in text and "KES 4.0639" in text, text
+
+
+def test_6b_filter_same_run_stop_sell_guard(cooldown_state):
+    """A stop-loss sell executing this session blocks the same-day buy-back."""
+    report = AutoTraderReport()
+    buys = [{"symbol": "KCB", "delta_shares": 10}]
+    sells = [{"symbol": "KCB", "stop_loss": True}]
+
+    kept = _apply_cooldown_buy_filter(buys, sells, report)
+
+    assert kept == [], "same-run stop-sell re-entry must be blocked"
+    assert "KCB" in report.build()
+
+
+def test_6b_filter_fail_closed_when_status_raises(
+    cooldown_state, monkeypatch, caplog
+):
+    """Even if cooldown_status itself raises, the cooled buy is DROPPED
+    (fail-closed) — never silently kept like the old except-and-continue."""
+    def _boom(symbol):
+        if symbol == "KNRE":
+            raise RuntimeError("state exploded")
+        return {"active": False}
+
+    monkeypatch.setattr(at, "cooldown_status", _boom)
+    report = AutoTraderReport()
+    buys = [{"symbol": "KNRE", "delta_shares": 100},
+            {"symbol": "KCB", "delta_shares": 10}]
+
+    with caplog.at_level("WARNING"):
+        kept = _apply_cooldown_buy_filter(buys, [], report)
+
+    assert [b["symbol"] for b in kept] == ["KCB"], (
+        "a raising cooldown check must fail CLOSED: drop the buy, keep others"
+    )

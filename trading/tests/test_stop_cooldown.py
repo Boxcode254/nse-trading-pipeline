@@ -25,7 +25,12 @@ import pytest
 
 import trading.stop_cooldown as sc
 import trading.target_allocation as ta
-from trading.stop_cooldown import cooldown_status, list_cooldowns, record_stop_exit
+from trading.stop_cooldown import (
+    cooldown_status,
+    format_exit_price,
+    list_cooldowns,
+    record_stop_exit,
+)
 
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
@@ -562,6 +567,96 @@ def test_cli_exit_code_signals_active_cooldowns(state_file, capsys):
     capsys.readouterr()
     assert cmd.run(as_json=True) == 0
     assert cmd.run(quiet=True) == 1
+
+
+# ── format_exit_price + price-less cooldown entries (t_0c02fd5c) ────────────
+#
+# Commit 8a781e0 made cooldown_status() report exit_price=None for a state
+# entry with no recorded price, but BOTH consumers still formatted that value
+# as a float via `.get('exit_price', 0.0)` — a default that never applies
+# because the key exists with the value None. Result: a NoneType format
+# TypeError that (a) aborted generate_rebalance_plan entirely and (b) was
+# swallowed by the auto-trader's 6b filter, silently reopening the cooled
+# buy. These tests lock the fixed behaviour.
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (4.0639, "KES 4.0639"),
+        (4, "KES 4.0000"),
+        (None, "KES n/a"),
+        ("4.0639", "KES n/a"),
+        (True, "KES n/a"),
+        (False, "KES n/a"),
+    ],
+    ids=["float", "int", "none", "str", "bool-true", "bool-false"],
+)
+def test_format_exit_price(value, expected):
+    assert format_exit_price(value) == expected
+
+
+def _write_raw_cooldown_state(path, entry: dict) -> None:
+    """Write a cooldown state entry verbatim (record_stop_exit always fills
+    exit_price; these defects are only reachable via corrupt/hand-edited
+    state, so the tests must write the state file directly)."""
+    path.write_text(
+        json.dumps({"version": 1, "entries": {"KNRE": entry}}) + "\n"
+    )
+
+
+_PRICELESS_ENTRIES = [
+    {"exit_date": "2026-10-16", "sessions": 5},  # exit_price key ABSENT
+    {"exit_date": "2026-10-16", "exit_price": None, "sessions": 5},  # None
+]
+
+
+@pytest.mark.parametrize("entry", _PRICELESS_ENTRIES, ids=["absent", "none"])
+def test_plan_with_priceless_cooldown_entry_builds_and_skips(
+    state_file, monkeypatch, entry
+):
+    """B1 (t_0c02fd5c): generate_rebalance_plan must NOT crash on an active
+    cooldown entry with no numeric exit_price. It builds a plan, buys NO
+    KNRE, and emits a STOP_COOLDOWN skip whose message contains 'n/a' and
+    never 'KES 0.0000'."""
+    monkeypatch.setattr(sc, "_today", lambda: date(2026, 10, 19))
+    _write_raw_cooldown_state(state_file, entry)
+
+    plan = _run_incident_plan()  # drives the REAL new-position BUY branch
+    assert _plan_knre_buys(plan) == [], (
+        "cooled KNRE must not be re-bought even with an unknown exit price"
+    )
+    skips = [v for v in plan["violations"] if v.get("type") == "STOP_COOLDOWN"]
+    assert skips, "expected a STOP_COOLDOWN skip explaining the block"
+    msg = skips[0]["message"]
+    assert "n/a" in msg, msg
+    assert "0.0000" not in msg, msg
+    # Cooldown must not bleed into other names
+    assert any(
+        t["symbol"] == "BRIT" and t["side"] == "BUY" for t in plan["trades"]
+    )
+
+
+@pytest.mark.parametrize("entry", _PRICELESS_ENTRIES, ids=["absent", "none"])
+def test_topup_with_priceless_cooldown_entry_builds_and_skips(
+    state_file, monkeypatch, entry
+):
+    """Same defect through the TOP-UP BUY branch (held KNRE, underweight
+    insurance sector): no crash, no top-up, 'n/a' message."""
+    monkeypatch.setattr(sc, "_today", lambda: date(2026, 10, 19))
+    _write_raw_cooldown_state(state_file, entry)
+
+    plan = generate_rebalance_plan(
+        signals=[dict(s) for s in _SIGNALS],
+        prices=dict(_INCIDENT_PRICES),
+        portfolio=_topup_book(),
+        dry_run=True,
+    )
+    assert _plan_knre_buys(plan) == []
+    skips = [v for v in plan["violations"] if v.get("type") == "STOP_COOLDOWN"]
+    assert skips, "expected a STOP_COOLDOWN skip explaining the top-up block"
+    msg = skips[0]["message"]
+    assert "n/a" in msg, msg
+    assert "0.0000" not in msg, msg
 
 
 def test_cli_registry_has_stop_cooldown(capsys):

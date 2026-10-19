@@ -54,7 +54,7 @@ if _TRADING_ROOT not in sys.path:
 
 from trading import config
 from trading import risk_profiles as rp
-from trading.stop_cooldown import cooldown_status
+from trading.stop_cooldown import cooldown_status, format_exit_price
 
 # === POLICY TRIPWIRE (do not remove) ===
 # This engine may read ONLY portfolio state + prices (MTM) + risk weights.
@@ -764,9 +764,11 @@ def generate_rebalance_plan(
             "severity": "SKIP",
             "symbol": sym,
             "type": "STOP_COOLDOWN",
+            # format_exit_price (t_0c02fd5c): exit_price may be None for a state
+            # entry with no recorded price — "n/a", never a crash, never 0.0000.
             "message": (
                 f"Stop-loss re-entry cooldown: exited {cd.get('exit_date')} "
-                f"@ KES {cd.get('exit_price', 0.0):.4f}; "
+                f"@ {format_exit_price(cd.get('exit_price'))}; "
                 f"{cd.get('sessions_remaining', 0)} session(s) remaining "
                 f"(blocked until {cd.get('until')})"
             ),
