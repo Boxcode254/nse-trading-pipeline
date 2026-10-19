@@ -23,6 +23,7 @@ fetch_data(pair, days) -> pd.DataFrame
 """
 from __future__ import annotations
 
+import json
 import os
 from typing import Optional, Any
 
@@ -186,7 +187,21 @@ def _fetch_tradingview_cached(pair: str, days: Optional[int] = None) -> pd.DataF
     # 3. Build today's bar DataFrame if we have real data
     today_df: pd.DataFrame = pd.DataFrame()
     today = pd.Timestamp.today().normalize()
-    if tv is not None:
+
+    # NSE trades Mon–Fri only. TradingView keeps serving the last real
+    # session's bar through the weekend, and stamping it under Saturday/
+    # Sunday appended phantom rows (found 2026-08-23: every nse_*.csv
+    # carried byte-identical Sat+Sun copies of Friday's bar — inflates
+    # sample size and deflates daily vol in any resample/pct_change).
+    # On non-business days: NEVER append — the cache already holds Friday.
+    _is_trading_day = today.weekday() < 5
+
+    # Market close check (15:00 EAT) - ONLY write intraday prices AFTER market close
+    # This prevents premature daily-bar stamping on mid-session data
+    now = pd.Timestamp.now()
+    market_close = today.replace(hour=15, minute=0, second=0, microsecond=0)
+    
+    if tv is not None and _is_trading_day:
         today_df = pd.DataFrame(
             [{
                 "open": tv["open"],
@@ -199,17 +214,43 @@ def _fetch_tradingview_cached(pair: str, days: Optional[int] = None) -> pd.DataF
         )
         today_df.index.name = "date"
 
-        # Append to cache for next run
-        # Avoid duplicating if today's date already cached
-        if not cached.empty and today in cached.index:
-            cached.loc[today] = [tv["open"], tv["high"], tv["low"],
-                                 tv["close"], tv["volume"]]
-        else:
-            cached = pd.concat([cached, today_df])
-        cached = cached[~cached.index.duplicated(keep="last")]
-        cached.to_csv(csv_path)
+        # AXYS TAPE GUARD: check official close before writing
+        axys_closes_path = os.path.join(config.HOME, "portfolio", f"axys_closes_{today.date().isoformat()}.json")
+        axys_closes = {}
+        if os.path.exists(axys_closes_path):
+            try:
+                with open(axys_closes_path) as f:
+                    axys_closes = json.load(f).get("axys", {})
+            except (OSError, json.JSONDecodeError):
+                pass
 
-    # 4. Combine: use cached + today's bar
+        # Verify against official AXYS close if available
+        if pair in axys_closes:
+            official_close = float(axys_closes[pair])
+            if abs(tv["close"] - official_close) > 0.01:  # Allow small rounding differences
+                raise ValueError(
+                    f"TAPE GUARD VIOLATION: TradingView close {tv['close']} "
+                    f"does not match official AXYS close {official_close} "
+                    f"for {pair} on {today.date().isoformat()}. "
+                    f"Aborting write to prevent silent divergence."
+                )
+
+        # Only write to CSV AFTER market close (15:00 EAT)
+        if now >= market_close:
+            # Append to cache for next run
+            # Avoid duplicating if today's date already cached
+            if not cached.empty and today in cached.index:
+                cached.loc[today] = [tv["open"], tv["high"], tv["low"],
+                                     tv["close"], tv["volume"]]
+            else:
+                cached = pd.concat([cached, today_df])
+            cached = cached[~cached.index.duplicated(keep="last")]
+            cached.to_csv(csv_path)
+        else:
+            # Intraday data: don't write to CSV yet
+            source = "tradingview_intraday"
+
+    # 4. Combine: use cached + today's bar (for both intraday and post-close paths)
     combined = cached.copy() if not cached.empty else pd.DataFrame()
     if not today_df.empty and (combined.empty or today not in combined.index):
         combined = pd.concat([combined, today_df])

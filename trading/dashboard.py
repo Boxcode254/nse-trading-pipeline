@@ -105,11 +105,43 @@ class Dashboard:
 
     @staticmethod
     def _get_real_portfolio_value() -> dict:
-        """Get portfolio snapshot from state.json (auto-trader system)."""
+        """Get portfolio snapshot, preferring mark-to-market from mtm_state.json.
+
+        mtm_state.json is the auto-trader's mark-to-market file (live prices,
+        what the live dashboard shows). state.json is the cost-basis book and
+        is used only as a fallback when mtm_state.json is missing.
+        """
         try:
-            path = Path.home() / ".trading" / "portfolio" / "state.json"
-            if path.exists():
-                with open(path) as f:
+            base = Path.home() / ".trading" / "portfolio"
+            mtm_path = base / "mtm_state.json"
+            state_path = base / "state.json"
+
+            if mtm_path.exists():
+                with open(mtm_path) as f:
+                    d = json.load(f)
+                summary = d.get("summary", {}) or {}
+                total_cash = d.get("cash", 0)
+                invested = summary.get("total_market_value")
+                if invested is None:
+                    invested = sum(
+                        p.get("current_value", 0) for p in d.get("positions", [])
+                    )
+                portfolio_value = summary.get("total_portfolio_value")
+                if portfolio_value is None:
+                    portfolio_value = total_cash + invested
+                positions = d.get("positions", [])
+                return {
+                    "value": round(float(portfolio_value), 2),
+                    "cash": round(float(total_cash), 2),
+                    "invested": round(float(invested), 2),
+                    "positions": len(positions),
+                    "total_shares": sum(p.get("shares", 0) for p in positions),
+                    "updated": d.get("generated_at", "unknown"),
+                    "source": "mtm_state.json (mark-to-market)",
+                }
+
+            if state_path.exists():
+                with open(state_path) as f:
                     d = json.load(f)
                 total_cash = d.get("cash", 0)
                 positions = d.get("positions", [])
@@ -123,10 +155,10 @@ class Dashboard:
                     "positions": len(positions),
                     "total_shares": total_shares,
                     "updated": d.get("updated_at", "unknown"),
-                    "source": "state.json (auto-trader system)",
+                    "source": "state.json (cost-basis fallback)",
                 }
             return {"value": 0, "cash": 0, "invested": 0, "positions": 0,
-                    "total_shares": 0, "source": "no state.json"}
+                    "total_shares": 0, "source": "no mtm_state.json / state.json"}
         except Exception as e:
             return {"value": 0, "cash": 0, "invested": 0, "positions": 0,
                     "source": f"error: {e}"}
@@ -136,7 +168,7 @@ class Dashboard:
         pv = self._get_real_portfolio_value()
         return (
             f"{self.ARCHIVE_NOTE}\n\n"
-            f"### 📊 Real Portfolio (from auto-trader state.json)\n"
+            f"### 📊 Real Portfolio (mark-to-market, from auto-trader mtm_state.json)\n"
             f"| Metric | Value |\n"
             f"|--------|-------|\n"
             f"| **Portfolio Value** | KES {pv['value']:,.2f} |\n"

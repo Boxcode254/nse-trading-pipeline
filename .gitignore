@@ -19,6 +19,11 @@ portfolio/*.bak
 portfolio/.outcome_reviewer_progress.json
 portfolio/state_changes.log
 portfolio/axys_closes_*.json
+# Runtime bookkeeping + pre-fix snapshots + one-off restore backups (never commit)
+portfolio/.outcome_ingest_progress.json
+portfolio/backup-*/
+# Scratch/debug working files
+tmp/
 
 # Auto-trader baseline (written at runtime by auto-trader-baseline.py)
 auto-trader-baseline.json

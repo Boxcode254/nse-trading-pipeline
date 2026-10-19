@@ -153,7 +153,7 @@ def cmd_impact(args):
 
     print(f"⚡ Portfolio Impact — last {args.since}:\n")
     for a in affected:
-        imp = a.get("impact", "?")
+        imp = a.get("impact") or "neutral"
         print(f"  {a['date']} [{imp.upper()}] {a['headline'][:70]}")
         held = [t for t in a.get("tickers", []) if t in holdings]
         print(f"  Holdings: {', '.join(held)}")

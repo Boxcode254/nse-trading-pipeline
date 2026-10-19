@@ -8,7 +8,9 @@ cd ~/.trading || exit 1
 # Run morning brief which now integrates learning
 # Refresh MTM prices in state.json (use the trading venv for a single
 # consistent interpreter across the whole pipeline)
-.venv/bin/python ~/.hermes/scripts/refresh-mtm.py
+# Points at the NEW price_source-wired copy — the OLD ~/.hermes/scripts one
+# (no AXYS awareness, retired 2026-08-26) caused the two-copies drift bug.
+.venv/bin/python scripts/refresh-mtm.py
 
 exec .venv/bin/python -m trading.cli.main morning --telegram --save 2>&1
 
