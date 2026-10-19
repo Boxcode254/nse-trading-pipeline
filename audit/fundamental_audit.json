@@ -1,0 +1,819 @@
+{
+  "records": [
+    {
+      "client_order_id": "cli-becd9c561014447aae21816860482aa0",
+      "symbol": "COOP",
+      "side": "SELL",
+      "shares": 303,
+      "fill_price": 35.3,
+      "status": "FILLED",
+      "audit_id": "2026-08-27T07:39:57Z",
+      "health_at_exec": "HEALTHY",
+      "reasons": [
+        "PAT stable/growing"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-bac143b5cac24d75ac65b950ebe117a4",
+      "symbol": "KCB",
+      "side": "BUY",
+      "shares": 32,
+      "fill_price": 84.0,
+      "status": "FILLED",
+      "audit_id": "2026-08-27T07:39:57Z",
+      "health_at_exec": "HEALTHY",
+      "reasons": [
+        "PAT stable/growing"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-d5e0f1850ddc4a12bbc8c06a05cd5bde",
+      "symbol": "SCBK",
+      "side": "BUY",
+      "shares": 11,
+      "fill_price": 340.0,
+      "status": "FILLED",
+      "audit_id": "2026-08-27T07:39:57Z",
+      "health_at_exec": "WATCH",
+      "reasons": [
+        "PAT -16.8% YoY (declining)"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-757c1a7a51b94003848f7bcb51c25ac2",
+      "symbol": "COOP",
+      "side": "BUY",
+      "shares": 111,
+      "fill_price": 35.3,
+      "status": "FILLED",
+      "audit_id": "2026-08-27T07:39:57Z",
+      "health_at_exec": "HEALTHY",
+      "reasons": [
+        "PAT stable/growing"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "probe2-COOP",
+      "symbol": "COOP",
+      "side": "SELL",
+      "shares": 59,
+      "fill_price": 35.09,
+      "status": "FILLED",
+      "audit_id": "2026-08-27T07:39:57Z",
+      "health_at_exec": "HEALTHY",
+      "reasons": [
+        "PAT stable/growing"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "probe2-EQTY",
+      "symbol": "EQTY",
+      "side": "SELL",
+      "shares": 148,
+      "fill_price": 86.73,
+      "status": "FILLED",
+      "audit_id": "2026-08-27T07:39:57Z",
+      "health_at_exec": "HEALTHY",
+      "reasons": [
+        "PAT stable/growing"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-be8546a477fb4706a0b57367d86fc0c2",
+      "symbol": "ABSA",
+      "side": "SELL",
+      "shares": 254,
+      "fill_price": 32.95,
+      "status": "FILLED",
+      "audit_id": "2026-08-27T07:39:57Z",
+      "health_at_exec": "WATCH",
+      "reasons": [
+        "PAT -9.8% YoY (declining)"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-3120a7ca97c74e0aac7befd83801b6ca",
+      "symbol": "KCB",
+      "side": "BUY",
+      "shares": 32,
+      "fill_price": 84.0,
+      "status": "FILLED",
+      "audit_id": "2026-08-27T07:39:57Z",
+      "health_at_exec": "HEALTHY",
+      "reasons": [
+        "PAT stable/growing"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-08a2e5f36a9a48a0811a0a212e5dfec8",
+      "symbol": "SCBK",
+      "side": "BUY",
+      "shares": 12,
+      "fill_price": 339.0,
+      "status": "FILLED",
+      "audit_id": "2026-08-27T07:39:57Z",
+      "health_at_exec": "WATCH",
+      "reasons": [
+        "PAT -16.8% YoY (declining)"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-2175bce518c64336ba6fa8e38cf2d9ae",
+      "symbol": "COOP",
+      "side": "BUY",
+      "shares": 117,
+      "fill_price": 35.2,
+      "status": "FILLED",
+      "audit_id": "2026-08-27T07:39:57Z",
+      "health_at_exec": "HEALTHY",
+      "reasons": [
+        "PAT stable/growing"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-1b4170e5c647411bb6c0b086128de25d",
+      "symbol": "KCB",
+      "side": "SELL",
+      "shares": 134,
+      "fill_price": 84.0,
+      "status": "FILLED",
+      "audit_id": "2026-08-27T07:39:57Z",
+      "health_at_exec": "HEALTHY",
+      "reasons": [
+        "PAT stable/growing"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-59f809ce9eea46a1b3af13244ef48a36",
+      "symbol": "KCB",
+      "side": "BUY",
+      "shares": 32,
+      "fill_price": 84.0,
+      "status": "FILLED",
+      "audit_id": "2026-08-27T07:39:57Z",
+      "health_at_exec": "HEALTHY",
+      "reasons": [
+        "PAT stable/growing"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-0798932802444ba3a5f7261523a84e76",
+      "symbol": "SCBK",
+      "side": "BUY",
+      "shares": 12,
+      "fill_price": 339.0,
+      "status": "FILLED",
+      "audit_id": "2026-08-27T07:39:57Z",
+      "health_at_exec": "WATCH",
+      "reasons": [
+        "PAT -16.8% YoY (declining)"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-d8e8ac2dbccf4f84b8925a2c1b2bcfae",
+      "symbol": "COOP",
+      "side": "BUY",
+      "shares": 117,
+      "fill_price": 35.2,
+      "status": "FILLED",
+      "audit_id": "2026-08-27T07:39:57Z",
+      "health_at_exec": "HEALTHY",
+      "reasons": [
+        "PAT stable/growing"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-11fc498427aa467486d6a06dc9fe97d1",
+      "symbol": "SCBK",
+      "side": "SELL",
+      "shares": 30,
+      "fill_price": 337.0,
+      "status": "FILLED",
+      "audit_id": "2026-08-27T07:39:57Z",
+      "health_at_exec": "WATCH",
+      "reasons": [
+        "PAT -16.8% YoY (declining)"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-ec06da0513fa438581850df38ff8dfd0",
+      "symbol": "EQTY",
+      "side": "BUY",
+      "shares": 33,
+      "fill_price": 88.0,
+      "status": "FILLED",
+      "audit_id": "2026-08-27T07:39:57Z",
+      "health_at_exec": "HEALTHY",
+      "reasons": [
+        "PAT stable/growing"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-ad3c100067ef40358f73061824748954",
+      "symbol": "KCB",
+      "side": "BUY",
+      "shares": 49,
+      "fill_price": 83.75,
+      "status": "FILLED",
+      "audit_id": "2026-08-27T07:39:57Z",
+      "health_at_exec": "HEALTHY",
+      "reasons": [
+        "PAT stable/growing"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-682ce497e0d445fa9827e1baa8f6f518",
+      "symbol": "ABSA",
+      "side": "BUY",
+      "shares": 125,
+      "fill_price": 33.0,
+      "status": "FILLED",
+      "audit_id": "2026-08-27T07:39:57Z",
+      "health_at_exec": "WATCH",
+      "reasons": [
+        "PAT -9.8% YoY (declining)"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-64cf290781c34f39871702bfb2d1f935",
+      "symbol": "COOP",
+      "side": "SELL",
+      "shares": 326,
+      "fill_price": 35.0,
+      "status": "FILLED",
+      "audit_id": "2026-08-27T07:39:57Z",
+      "health_at_exec": "HEALTHY",
+      "reasons": [
+        "PAT stable/growing"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-4b1b523c48924f66b587b6b14b9b7787",
+      "symbol": "KCB",
+      "side": "BUY",
+      "shares": 19,
+      "fill_price": 84.0,
+      "status": "FILLED",
+      "audit_id": "2026-08-27T07:39:57Z",
+      "health_at_exec": "HEALTHY",
+      "reasons": [
+        "PAT stable/growing"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-9ea650ccda054bf697bd31c763a44135",
+      "symbol": "EQTY",
+      "side": "BUY",
+      "shares": 47,
+      "fill_price": 87.0,
+      "status": "FILLED",
+      "audit_id": "2026-08-27T07:39:57Z",
+      "health_at_exec": "HEALTHY",
+      "reasons": [
+        "PAT stable/growing"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-5c63ef3bbf7346feb1e1f8f7a23643d4",
+      "symbol": "ABSA",
+      "side": "BUY",
+      "shares": 74,
+      "fill_price": 33.2,
+      "status": "FILLED",
+      "audit_id": "2026-08-27T07:39:57Z",
+      "health_at_exec": "WATCH",
+      "reasons": [
+        "PAT -9.8% YoY (declining)"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-7b7aab6113ca46e7aaee6a18d1fd0d4d",
+      "symbol": "SCBK",
+      "side": "BUY",
+      "shares": 12,
+      "fill_price": 340.0,
+      "status": "FILLED",
+      "audit_id": "2026-08-27T07:39:57Z",
+      "health_at_exec": "WATCH",
+      "reasons": [
+        "PAT -16.8% YoY (declining)"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-d8bf96f1d31b4d45a1d1f84a447d10e4",
+      "symbol": "KCB",
+      "side": "SELL",
+      "shares": 26,
+      "fill_price": 84.25,
+      "status": "FILLED",
+      "audit_id": "2026-08-27T07:39:57Z",
+      "health_at_exec": "HEALTHY",
+      "reasons": [
+        "PAT stable/growing"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-ea244dc4bdb84e8b9cd9caf69489ee1b",
+      "symbol": "EQTY",
+      "side": "BUY",
+      "shares": 36,
+      "fill_price": 87.0,
+      "status": "FILLED",
+      "audit_id": "2026-08-27T07:39:57Z",
+      "health_at_exec": "HEALTHY",
+      "reasons": [
+        "PAT stable/growing"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-55aa7796bb9140a8a2928648097aac80",
+      "symbol": "COOP",
+      "side": "BUY",
+      "shares": 118,
+      "fill_price": 34.95,
+      "status": "FILLED",
+      "audit_id": "2026-08-27T07:39:57Z",
+      "health_at_exec": "HEALTHY",
+      "reasons": [
+        "PAT stable/growing"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-a7cb121e270b44fbbe92342dae1f329c",
+      "symbol": "EQTY",
+      "side": "SELL",
+      "shares": 83,
+      "fill_price": 87.0,
+      "status": "FILLED",
+      "audit_id": "2026-08-27T07:39:57Z",
+      "health_at_exec": "HEALTHY",
+      "reasons": [
+        "PAT stable/growing"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-140baf7b4ab94464a47355d0c614bae8",
+      "symbol": "KCB",
+      "side": "BUY",
+      "shares": 24,
+      "fill_price": 86.0,
+      "status": "FILLED",
+      "audit_id": "2026-08-27T07:39:57Z",
+      "health_at_exec": "HEALTHY",
+      "reasons": [
+        "PAT stable/growing"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-4722737d3f464f588c540e31166c7b8c",
+      "symbol": "COOP",
+      "side": "BUY",
+      "shares": 118,
+      "fill_price": 34.9,
+      "status": "FILLED",
+      "audit_id": "2026-08-27T07:39:57Z",
+      "health_at_exec": "HEALTHY",
+      "reasons": [
+        "PAT stable/growing"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-0336bfbf5e814585aab7ca2c83b0c726",
+      "symbol": "KCB",
+      "side": "SELL",
+      "shares": 73,
+      "fill_price": 87.0,
+      "status": "FILLED",
+      "audit_id": "2026-08-27T07:39:57Z",
+      "health_at_exec": "HEALTHY",
+      "reasons": [
+        "PAT stable/growing"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-bd491a79ed0344b392d1a0972e6e3f10",
+      "symbol": "EQTY",
+      "side": "BUY",
+      "shares": 48,
+      "fill_price": 87.0,
+      "status": "FILLED",
+      "audit_id": "2026-08-27T07:39:57Z",
+      "health_at_exec": "HEALTHY",
+      "reasons": [
+        "PAT stable/growing"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-e5030d34a1e74e81bf4732e8f3b2c9b5",
+      "symbol": "COOP",
+      "side": "BUY",
+      "shares": 35,
+      "fill_price": 34.95,
+      "status": "FILLED",
+      "audit_id": "2026-08-27T07:39:57Z",
+      "health_at_exec": "HEALTHY",
+      "reasons": [
+        "PAT stable/growing"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-029fd38f1f2f43d8acc4b4319e0dd686",
+      "symbol": "COOP",
+      "side": "SELL",
+      "shares": 158,
+      "fill_price": 36.0,
+      "status": "FILLED",
+      "audit_id": "2026-08-27T07:39:57Z",
+      "health_at_exec": "HEALTHY",
+      "reasons": [
+        "PAT stable/growing"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-0f0eadbab3184bde8f06df487b78e4a8",
+      "symbol": "KCB",
+      "side": "BUY",
+      "shares": 48,
+      "fill_price": 87.0,
+      "status": "FILLED",
+      "audit_id": "2026-08-27T07:39:57Z",
+      "health_at_exec": "HEALTHY",
+      "reasons": [
+        "PAT stable/growing"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-9d4c24da1b6345a29291d3e76b50c3fb",
+      "symbol": "EQTY",
+      "side": "BUY",
+      "shares": 36,
+      "fill_price": 87.5,
+      "status": "FILLED",
+      "audit_id": "2026-08-27T07:39:57Z",
+      "health_at_exec": "HEALTHY",
+      "reasons": [
+        "PAT stable/growing"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-86c8d2faf5214f988db5ea15336bc3d3",
+      "symbol": "KCB",
+      "side": "BUY",
+      "shares": 19,
+      "fill_price": 90.1347,
+      "status": "FILLED",
+      "audit_id": "2026-08-27T07:39:57Z",
+      "health_at_exec": "HEALTHY",
+      "reasons": [
+        "PAT stable/growing"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-920486a6a1cb429f8caa488b6d3d3301",
+      "symbol": "KPLC",
+      "side": "SELL",
+      "shares": 453,
+      "fill_price": 22.8657,
+      "status": "FILLED",
+      "audit_id": "2026-08-28T07:35:21Z",
+      "health_at_exec": "HEALTHY",
+      "reasons": [
+        "PAT stable/growing"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-e623a2d5ce294cec975867925534b716",
+      "symbol": "KPLC",
+      "side": "BUY",
+      "shares": 191,
+      "fill_price": 22.8342,
+      "status": "FILLED",
+      "audit_id": "2026-08-31T07:35:55Z",
+      "health_at_exec": "HEALTHY",
+      "reasons": [
+        "PAT stable/growing"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-7251b40540834467a9c8264e1f46418e",
+      "symbol": "TOTL",
+      "side": "BUY",
+      "shares": 87,
+      "fill_price": 49.5743,
+      "status": "FILLED",
+      "audit_id": "2026-08-31T07:35:55Z",
+      "health_at_exec": "HEALTHY",
+      "reasons": [
+        "PAT stable/growing"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-7e35f3b620ed44bca3c248f8674a3de8",
+      "symbol": "KNRE",
+      "side": "SELL",
+      "shares": 2188,
+      "fill_price": 4.3535,
+      "status": "FILLED",
+      "audit_id": "2026-09-08T06:56:52Z",
+      "health_at_exec": "HEALTHY",
+      "reasons": [
+        "PAT stable/growing"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-ffd6e74df11f4e82a58c1c129a49b617",
+      "symbol": "EQTY",
+      "side": "SELL",
+      "shares": 117,
+      "fill_price": 108.8365,
+      "status": "FILLED",
+      "audit_id": "2026-09-08T06:56:52Z",
+      "health_at_exec": "HEALTHY",
+      "reasons": [
+        "PAT stable/growing"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-fbfdf0df66864193bae8e3db540b3ac1",
+      "symbol": "KNRE",
+      "side": "BUY",
+      "shares": 828,
+      "fill_price": 5.0876,
+      "status": "FILLED",
+      "audit_id": "2026-09-08T06:56:52Z",
+      "health_at_exec": "HEALTHY",
+      "reasons": [
+        "PAT stable/growing"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-a073cfe12d6e41dcb41df5ac3b304cc5",
+      "symbol": "KCB",
+      "side": "BUY",
+      "shares": 23,
+      "fill_price": 100.15,
+      "status": "FILLED",
+      "audit_id": "2026-09-08T06:56:52Z",
+      "health_at_exec": "HEALTHY",
+      "reasons": [
+        "PAT stable/growing"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-d0946e9f81e7495fab41f76721bbecf0",
+      "symbol": "ABSA",
+      "side": "BUY",
+      "shares": 75,
+      "fill_price": 35.0525,
+      "status": "FILLED",
+      "audit_id": "2026-09-08T06:56:52Z",
+      "health_at_exec": "WATCH",
+      "reasons": [
+        "PAT -9.8% YoY (declining)"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-dfd48a26016140f381a14b602b3ee046",
+      "symbol": "SCBK",
+      "side": "BUY",
+      "shares": 9,
+      "fill_price": 350.5256,
+      "status": "FILLED",
+      "audit_id": "2026-09-08T06:56:52Z",
+      "health_at_exec": "WATCH",
+      "reasons": [
+        "PAT -16.8% YoY (declining)"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-952e16244de542f3ac7d4eeaadde4028",
+      "symbol": "KNRE",
+      "side": "BUY",
+      "shares": 1044,
+      "fill_price": 4.1061,
+      "status": "FILLED",
+      "audit_id": "2026-09-08T07:37:18Z",
+      "health_at_exec": "HEALTHY",
+      "reasons": [
+        "PAT stable/growing"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-d4de582fa51f4061954fef814cb98ddc",
+      "symbol": "ABSA",
+      "side": "SELL",
+      "shares": 381,
+      "fill_price": 30.9535,
+      "status": "FILLED",
+      "audit_id": "2026-09-18T16:39:21Z",
+      "health_at_exec": "WATCH",
+      "reasons": [
+        "PAT -9.8% YoY (declining)"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-f7160e8015cc4040b9cea4fe8ac9446a",
+      "symbol": "KNRE",
+      "side": "SELL",
+      "shares": 1872,
+      "fill_price": 4.0939,
+      "status": "FILLED",
+      "audit_id": "2026-09-18T16:39:21Z",
+      "health_at_exec": "HEALTHY",
+      "reasons": [
+        "PAT stable/growing"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-c1cfac398c7343d39621b41c38f9d1b5",
+      "symbol": "SCBK",
+      "side": "BUY",
+      "shares": 12,
+      "fill_price": 331.2458,
+      "status": "FILLED",
+      "audit_id": "2026-09-21T07:35:26Z",
+      "health_at_exec": "WATCH",
+      "reasons": [
+        "PAT -16.8% YoY (declining)"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-7e950959c3884ace9b8ce93e20bdba80",
+      "symbol": "ABSA",
+      "side": "BUY",
+      "shares": 100,
+      "fill_price": 33.0996,
+      "status": "FILLED",
+      "audit_id": "2026-09-23T07:35:52Z",
+      "health_at_exec": "WATCH",
+      "reasons": [
+        "PAT -9.8% YoY (declining)"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-27d7b039cebe4d56b2969fbd4edab3c3",
+      "symbol": "KNRE",
+      "side": "BUY",
+      "shares": 903,
+      "fill_price": 4.3766,
+      "status": "FILLED",
+      "audit_id": "2026-09-23T07:35:52Z",
+      "health_at_exec": "HEALTHY",
+      "reasons": [
+        "PAT stable/growing"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-ae2647a346a7472d952764269fb088f7",
+      "symbol": "KCB",
+      "side": "BUY",
+      "shares": 44,
+      "fill_price": 93.1395,
+      "status": "FILLED",
+      "audit_id": "2026-09-23T07:35:52Z",
+      "health_at_exec": "HEALTHY",
+      "reasons": [
+        "PAT stable/growing"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-f75f30c2794f4a54be124e19a8f84964",
+      "symbol": "ABSA",
+      "side": "BUY",
+      "shares": 125,
+      "fill_price": 33.0495,
+      "status": "FILLED",
+      "audit_id": "2026-09-24T07:35:35Z",
+      "health_at_exec": "WATCH",
+      "reasons": [
+        "PAT -9.8% YoY (declining)"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-5af9e33ff5954e21a70e6f7d6888ff61",
+      "symbol": "KNRE",
+      "side": "BUY",
+      "shares": 899,
+      "fill_price": 4.3665,
+      "status": "FILLED",
+      "audit_id": "2026-09-24T07:35:35Z",
+      "health_at_exec": "HEALTHY",
+      "reasons": [
+        "PAT stable/growing"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-470b128ad3b54ea49dbb44aa87cd4eaf",
+      "symbol": "ABSA",
+      "side": "BUY",
+      "shares": 124,
+      "fill_price": 33.0996,
+      "status": "FILLED",
+      "audit_id": "2026-09-30T07:35:17Z",
+      "health_at_exec": "WATCH",
+      "reasons": [
+        "PAT -9.8% YoY (declining)"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-25ca0cf7e10349dd9f6d99ca591dbfe6",
+      "symbol": "KCB",
+      "side": "SELL",
+      "shares": 28,
+      "fill_price": 91.1132,
+      "status": "FILLED",
+      "audit_id": "2026-10-01T07:35:18Z",
+      "health_at_exec": "HEALTHY",
+      "reasons": [
+        "PAT stable/growing"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-0a52ae0b2e0e4ef6ab9f246d01ca388b",
+      "symbol": "KNRE",
+      "side": "SELL",
+      "shares": 1802,
+      "fill_price": 4.0639,
+      "status": "FILLED",
+      "audit_id": "2026-10-16T07:35:31Z",
+      "health_at_exec": "HEALTHY",
+      "reasons": [
+        "PAT stable/growing"
+      ],
+      "stale": false
+    },
+    {
+      "client_order_id": "cli-8b757dac7b984a048e980e6bba2f2ebc",
+      "symbol": "KNRE",
+      "side": "BUY",
+      "shares": 917,
+      "fill_price": 4.1462,
+      "status": "FILLED",
+      "audit_id": "2026-10-19T07:35:24Z",
+      "health_at_exec": "HEALTHY",
+      "reasons": [
+        "PAT stable/growing"
+      ],
+      "stale": false
+    }
+  ],
+  "_meta": {
+    "note": "Reset 2026-08-27 after dedup fix. Pre-fix log had 144 records from 36 orders (re-audit bloat). New log dedupes by client_order_id."
+  }
+}

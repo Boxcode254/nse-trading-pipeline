@@ -1,0 +1,46 @@
+{
+  "generated_at": "2026-08-13T18:49:18+00:00",
+  "approved_at": "2026-08-13T18:49:18+00:00",
+  "dry_run": false,
+  "proposal_id": "20260813_184918_0",
+  "any": {
+    "COOP": {
+      "buy_gate": 54.0,
+      "sell_hold_gate": 73.0
+    },
+    "EQTY": {
+      "buy_gate": 51.0,
+      "sell_hold_gate": 74.5
+    },
+    "KCB": {
+      "buy_gate": 42.37,
+      "sell_hold_gate": 78.81
+    }
+  },
+  "per_symbol": {
+    "COOP": {
+      "buy_gate": 54.0,
+      "sell_hold_gate": 73.0,
+      "samples": 4,
+      "win_rate": 0.5,
+      "avg_pnl_pct": 0.0,
+      "consistency": 0.0
+    },
+    "EQTY": {
+      "buy_gate": 51.0,
+      "sell_hold_gate": 74.5,
+      "samples": 4,
+      "win_rate": 0.75,
+      "avg_pnl_pct": 0.0,
+      "consistency": 0.0
+    },
+    "KCB": {
+      "buy_gate": 42.37,
+      "sell_hold_gate": 78.81,
+      "samples": 6,
+      "win_rate": 1.0,
+      "avg_pnl_pct": 0.0,
+      "consistency": 0.1411
+    }
+  }
+}

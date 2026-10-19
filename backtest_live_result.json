@@ -1,0 +1,960 @@
+{
+  "start": "2024-12-05",
+  "end": "2026-08-18",
+  "initial_capital": 100000.0,
+  "final_equity": 204089.15,
+  "total_return_pct": 104.0891,
+  "max_drawdown_pct": -4.0893,
+  "sharpe": 2.08,
+  "win_rate_pct": 100.0,
+  "profit_factor": null,
+  "total_trades": 32,
+  "trades": [
+    {
+      "date": "2024-12-05",
+      "symbol": "KCB",
+      "side": "BUY",
+      "shares": 105,
+      "price": 37.95,
+      "gross": 3984.75,
+      "fee": 60.0,
+      "slippage": 5.98,
+      "net_cash": -4050.73,
+      "reason": "Sector banking is -48.8% under target (risk weight 20%)",
+      "signal_score": 59.62456109413718
+    },
+    {
+      "date": "2024-12-05",
+      "symbol": "EQTY",
+      "side": "BUY",
+      "shares": 88,
+      "price": 45.0,
+      "gross": 3960.0,
+      "fee": 60.0,
+      "slippage": 5.94,
+      "net_cash": -4025.94,
+      "reason": "Sector banking is -48.8% under target (risk weight 20%)",
+      "signal_score": 56.704401369848505
+    },
+    {
+      "date": "2024-12-05",
+      "symbol": "ABSA",
+      "side": "BUY",
+      "shares": 264,
+      "price": 15.15,
+      "gross": 3999.6,
+      "fee": 60.0,
+      "slippage": 6.0,
+      "net_cash": -4065.6,
+      "reason": "Sector banking is -48.8% under target (risk weight 20%)",
+      "signal_score": 63.30099128961638
+    },
+    {
+      "date": "2024-12-05",
+      "symbol": "SCBK",
+      "side": "BUY",
+      "shares": 16,
+      "price": 250.0,
+      "gross": 4000.0,
+      "fee": 60.0,
+      "slippage": 6.0,
+      "net_cash": -4066.0,
+      "reason": "Sector banking is -48.8% under target (risk weight 20%)",
+      "signal_score": 71.096253599065
+    },
+    {
+      "date": "2024-12-05",
+      "symbol": "COOP",
+      "side": "BUY",
+      "shares": 279,
+      "price": 14.3,
+      "gross": 3989.7,
+      "fee": 60.0,
+      "slippage": 5.98,
+      "net_cash": -4055.68,
+      "reason": "Sector banking is -48.8% under target (risk weight 20%)",
+      "signal_score": 58.38132150548432
+    },
+    {
+      "date": "2024-12-05",
+      "symbol": "SCOM",
+      "side": "BUY",
+      "shares": 250,
+      "price": 16.0,
+      "gross": 4000.0,
+      "fee": 60.0,
+      "slippage": 6.0,
+      "net_cash": -4066.0,
+      "reason": "Sector telecom is -15.2% under target (risk weight 100%)",
+      "signal_score": 50.99593116300986
+    },
+    {
+      "date": "2024-12-05",
+      "symbol": "TOTL",
+      "side": "BUY",
+      "shares": 199,
+      "price": 20.05,
+      "gross": 3989.95,
+      "fee": 60.0,
+      "slippage": 5.98,
+      "net_cash": -4055.93,
+      "reason": "Sector energy is -11.9% under target (risk weight 50%)",
+      "signal_score": 50.0
+    },
+    {
+      "date": "2024-12-05",
+      "symbol": "EABL",
+      "side": "BUY",
+      "shares": 23,
+      "price": 170.0,
+      "gross": 3910.0,
+      "fee": 60.0,
+      "slippage": 5.87,
+      "net_cash": -3975.87,
+      "reason": "Sector consumer is -6.5% under target (risk weight 100%)",
+      "signal_score": 53.48991933804705
+    },
+    {
+      "date": "2024-12-09",
+      "symbol": "KCB",
+      "side": "BUY",
+      "shares": 103,
+      "price": 38.5,
+      "gross": 3965.5,
+      "fee": 60.0,
+      "slippage": 5.95,
+      "net_cash": -4031.45,
+      "reason": "Top-up KCB: sector banking is -28.6% under target (risk weight 20%)",
+      "signal_score": 51.48607222619657
+    },
+    {
+      "date": "2024-12-09",
+      "symbol": "EQTY",
+      "side": "BUY",
+      "shares": 86,
+      "price": 46.5,
+      "gross": 3999.0,
+      "fee": 60.0,
+      "slippage": 6.0,
+      "net_cash": -4065.0,
+      "reason": "Top-up EQTY: sector banking is -28.6% under target (risk weight 20%)",
+      "signal_score": 51.92487025365858
+    },
+    {
+      "date": "2024-12-09",
+      "symbol": "ABSA",
+      "side": "BUY",
+      "shares": 265,
+      "price": 15.05,
+      "gross": 3988.25,
+      "fee": 60.0,
+      "slippage": 5.98,
+      "net_cash": -4054.23,
+      "reason": "Top-up ABSA: sector banking is -28.6% under target (risk weight 20%)",
+      "signal_score": 61.492430869994664
+    },
+    {
+      "date": "2024-12-09",
+      "symbol": "SCBK",
+      "side": "BUY",
+      "shares": 15,
+      "price": 251.0,
+      "gross": 3765.0,
+      "fee": 60.0,
+      "slippage": 5.65,
+      "net_cash": -3830.65,
+      "reason": "Top-up SCBK: sector banking is -28.6% under target (risk weight 20%)",
+      "signal_score": 70.26118462313207
+    },
+    {
+      "date": "2024-12-09",
+      "symbol": "COOP",
+      "side": "BUY",
+      "shares": 276,
+      "price": 14.5,
+      "gross": 4002.0,
+      "fee": 60.03,
+      "slippage": 6.0,
+      "net_cash": -4068.03,
+      "reason": "Top-up COOP: sector banking is -28.6% under target (risk weight 20%)",
+      "signal_score": 61.68519235079465
+    },
+    {
+      "date": "2024-12-09",
+      "symbol": "SCOM",
+      "side": "BUY",
+      "shares": 240,
+      "price": 16.65,
+      "gross": 3996.0,
+      "fee": 60.0,
+      "slippage": 5.99,
+      "net_cash": -4061.99,
+      "reason": "Top-up SCOM: sector telecom is -11.0% under target (risk weight 100%)",
+      "signal_score": 57.64387095097824
+    },
+    {
+      "date": "2024-12-09",
+      "symbol": "TOTL",
+      "side": "BUY",
+      "shares": 190,
+      "price": 21.0,
+      "gross": 3990.0,
+      "fee": 60.0,
+      "slippage": 5.99,
+      "net_cash": -4055.99,
+      "reason": "Top-up TOTL: sector energy is -7.8% under target (risk weight 100%)",
+      "signal_score": 50.0
+    },
+    {
+      "date": "2024-12-10",
+      "symbol": "KPLC",
+      "side": "BUY",
+      "shares": 564,
+      "price": 3.7,
+      "gross": 2086.8,
+      "fee": 60.0,
+      "slippage": 3.13,
+      "net_cash": -2149.93,
+      "reason": "Sector energy is -4.2% under target (risk weight 50%)",
+      "signal_score": 51.216852362766275
+    },
+    {
+      "date": "2024-12-10",
+      "symbol": "KCB",
+      "side": "BUY",
+      "shares": 42,
+      "price": 39.1,
+      "gross": 1642.2,
+      "fee": 60.0,
+      "slippage": 2.46,
+      "net_cash": -1704.66,
+      "reason": "Top-up KCB: sector banking is -8.4% under target (risk weight 20%)",
+      "signal_score": 56.176663339313905
+    },
+    {
+      "date": "2024-12-10",
+      "symbol": "EQTY",
+      "side": "BUY",
+      "shares": 29,
+      "price": 48.1,
+      "gross": 1394.9,
+      "fee": 60.0,
+      "slippage": 2.09,
+      "net_cash": -1456.99,
+      "reason": "Top-up EQTY: sector banking is -8.4% under target (risk weight 20%)",
+      "signal_score": 58.2520139387741
+    },
+    {
+      "date": "2024-12-10",
+      "symbol": "ABSA",
+      "side": "BUY",
+      "shares": 104,
+      "price": 15.45,
+      "gross": 1606.8,
+      "fee": 60.0,
+      "slippage": 2.41,
+      "net_cash": -1669.21,
+      "reason": "Top-up ABSA: sector banking is -8.4% under target (risk weight 20%)",
+      "signal_score": 58.982745153925094
+    },
+    {
+      "date": "2024-12-10",
+      "symbol": "SCBK",
+      "side": "BUY",
+      "shares": 7,
+      "price": 251.0,
+      "gross": 1757.0,
+      "fee": 60.0,
+      "slippage": 2.64,
+      "net_cash": -1819.64,
+      "reason": "Top-up SCBK: sector banking is -8.4% under target (risk weight 20%)",
+      "signal_score": 70.22096577842076
+    },
+    {
+      "date": "2024-12-10",
+      "symbol": "COOP",
+      "side": "BUY",
+      "shares": 121,
+      "price": 14.45,
+      "gross": 1748.45,
+      "fee": 60.0,
+      "slippage": 2.62,
+      "net_cash": -1811.07,
+      "reason": "Top-up COOP: sector banking is -8.4% under target (risk weight 20%)",
+      "signal_score": 58.11845246855888
+    },
+    {
+      "date": "2024-12-10",
+      "symbol": "SCOM",
+      "side": "BUY",
+      "shares": 229,
+      "price": 17.5,
+      "gross": 4007.5,
+      "fee": 60.11,
+      "slippage": 6.01,
+      "net_cash": -4073.62,
+      "reason": "Top-up SCOM: sector telecom is -6.6% under target (risk weight 100%)",
+      "signal_score": 63.15033067470628
+    },
+    {
+      "date": "2024-12-10",
+      "symbol": "TOTL",
+      "side": "BUY",
+      "shares": 200,
+      "price": 20.0,
+      "gross": 4000.0,
+      "fee": 60.0,
+      "slippage": 6.0,
+      "net_cash": -4066.0,
+      "reason": "Top-up TOTL: sector energy is -4.2% under target (risk weight 100%)",
+      "signal_score": 50.0
+    },
+    {
+      "date": "2024-12-11",
+      "symbol": "SCOM",
+      "side": "BUY",
+      "shares": 180,
+      "price": 16.95,
+      "gross": 3051.0,
+      "fee": 60.0,
+      "slippage": 4.58,
+      "net_cash": -3115.58,
+      "reason": "Top-up SCOM: sector telecom is -3.0% under target (risk weight 100%)",
+      "signal_score": 59.58212925120909
+    },
+    {
+      "date": "2024-12-30",
+      "symbol": "KNRE",
+      "side": "BUY",
+      "shares": 3108,
+      "price": 1.27,
+      "gross": 3947.16,
+      "fee": 60.0,
+      "slippage": 5.92,
+      "net_cash": -4013.08,
+      "reason": "Sector insurance is -7.6% under target (risk weight 50%)",
+      "signal_score": 54.38425275313321
+    },
+    {
+      "date": "2024-12-31",
+      "symbol": "KNRE",
+      "side": "BUY",
+      "shares": 3195,
+      "price": 1.27,
+      "gross": 4057.65,
+      "fee": 60.86,
+      "slippage": 6.09,
+      "net_cash": -4124.6,
+      "reason": "Top-up KNRE: sector insurance is -3.9% under target (risk weight 100%)",
+      "signal_score": 55.14527083536244
+    },
+    {
+      "date": "2025-01-08",
+      "symbol": "KPLC",
+      "side": "SELL",
+      "shares": 115,
+      "price": 7.08,
+      "gross": 814.2,
+      "fee": 60.0,
+      "slippage": 1.22,
+      "net_cash": 752.98,
+      "reason": "Sector energy is +3.1% over target (risk-biased trim)",
+      "signal_score": 56.24679034931888
+    },
+    {
+      "date": "2025-01-08",
+      "symbol": "TOTL",
+      "side": "SELL",
+      "shares": 120,
+      "price": 21.3,
+      "gross": 2556.0,
+      "fee": 60.0,
+      "slippage": 3.83,
+      "net_cash": 2492.17,
+      "reason": "Sector energy is +3.1% over target (risk-biased trim)",
+      "signal_score": 50.0
+    },
+    {
+      "date": "2025-01-14",
+      "symbol": "KNRE",
+      "side": "SELL",
+      "shares": 1391,
+      "price": 1.73,
+      "gross": 2406.43,
+      "fee": 60.0,
+      "slippage": 3.61,
+      "net_cash": 2342.82,
+      "reason": "Sector insurance is +2.1% over target (risk-biased trim)",
+      "signal_score": 64.89057581198995
+    },
+    {
+      "date": "2026-07-11",
+      "symbol": "KPLC",
+      "side": "SELL",
+      "shares": 92,
+      "price": 18.3,
+      "gross": 1683.6,
+      "fee": 60.0,
+      "slippage": 2.53,
+      "net_cash": 1621.07,
+      "reason": "Sector energy is +3.1% over target (risk-biased trim)",
+      "signal_score": 71.33325176995231
+    },
+    {
+      "date": "2026-07-11",
+      "symbol": "TOTL",
+      "side": "SELL",
+      "shares": 96,
+      "price": 45.0,
+      "gross": 4320.0,
+      "fee": 64.8,
+      "slippage": 6.48,
+      "net_cash": 4248.72,
+      "reason": "Sector energy is +3.1% over target (risk-biased trim)",
+      "signal_score": 44.04159237625544
+    },
+    {
+      "date": "2026-07-11",
+      "symbol": "EABL",
+      "side": "BUY",
+      "shares": 24,
+      "price": 265.0,
+      "gross": 6360.0,
+      "fee": 95.4,
+      "slippage": 9.54,
+      "net_cash": -6464.94,
+      "reason": "Top-up EABL: sector consumer is -3.4% under target (risk weight 100%)",
+      "signal_score": 54.87537306648232
+    }
+  ],
+  "equity_curve": [
+    {
+      "date": "2024-12-05",
+      "cash": 67638.25,
+      "holdings": 31834.0,
+      "equity": 99472.25
+    },
+    {
+      "date": "2024-12-09",
+      "cash": 39470.91,
+      "holdings": 60126.45,
+      "equity": 99597.36
+    },
+    {
+      "date": "2024-12-10",
+      "cash": 20719.79,
+      "holdings": 78984.65,
+      "equity": 99704.44
+    },
+    {
+      "date": "2024-12-11",
+      "cash": 17604.21,
+      "holdings": 82739.3,
+      "equity": 100343.51
+    },
+    {
+      "date": "2024-12-13",
+      "cash": 17604.21,
+      "holdings": 82663.3,
+      "equity": 100267.51
+    },
+    {
+      "date": "2024-12-16",
+      "cash": 17604.21,
+      "holdings": 82125.14,
+      "equity": 99729.35
+    },
+    {
+      "date": "2024-12-19",
+      "cash": 17604.21,
+      "holdings": 83384.95,
+      "equity": 100989.16
+    },
+    {
+      "date": "2024-12-20",
+      "cash": 17604.21,
+      "holdings": 84612.59,
+      "equity": 102216.8
+    },
+    {
+      "date": "2024-12-23",
+      "cash": 17604.21,
+      "holdings": 84917.34,
+      "equity": 102521.55
+    },
+    {
+      "date": "2024-12-30",
+      "cash": 13591.13,
+      "holdings": 90364.6,
+      "equity": 103955.73
+    },
+    {
+      "date": "2024-12-31",
+      "cash": 9466.53,
+      "holdings": 95934.76,
+      "equity": 105401.29
+    },
+    {
+      "date": "2025-01-02",
+      "cash": 9466.53,
+      "holdings": 99009.37,
+      "equity": 108475.9
+    },
+    {
+      "date": "2025-01-03",
+      "cash": 9466.53,
+      "holdings": 99859.05,
+      "equity": 109325.58
+    },
+    {
+      "date": "2025-01-06",
+      "cash": 9466.53,
+      "holdings": 100590.51,
+      "equity": 110057.04
+    },
+    {
+      "date": "2025-01-07",
+      "cash": 9466.53,
+      "holdings": 101047.98,
+      "equity": 110514.51
+    },
+    {
+      "date": "2025-01-08",
+      "cash": 12711.68,
+      "holdings": 97475.15,
+      "equity": 110186.83
+    },
+    {
+      "date": "2025-01-09",
+      "cash": 12711.68,
+      "holdings": 97465.95,
+      "equity": 110177.63
+    },
+    {
+      "date": "2025-01-10",
+      "cash": 12711.68,
+      "holdings": 98498.7,
+      "equity": 111210.38
+    },
+    {
+      "date": "2025-01-13",
+      "cash": 12711.68,
+      "holdings": 98252.54,
+      "equity": 110964.22
+    },
+    {
+      "date": "2025-01-14",
+      "cash": 15054.5,
+      "holdings": 96839.16,
+      "equity": 111893.66
+    },
+    {
+      "date": "2025-01-15",
+      "cash": 15054.5,
+      "holdings": 95365.05,
+      "equity": 110419.55
+    },
+    {
+      "date": "2025-01-16",
+      "cash": 15054.5,
+      "holdings": 95713.96,
+      "equity": 110768.46
+    },
+    {
+      "date": "2025-01-17",
+      "cash": 15054.5,
+      "holdings": 95834.33,
+      "equity": 110888.83
+    },
+    {
+      "date": "2025-01-20",
+      "cash": 15054.5,
+      "holdings": 95306.94,
+      "equity": 110361.44
+    },
+    {
+      "date": "2025-01-21",
+      "cash": 15054.5,
+      "holdings": 95734.28,
+      "equity": 110788.78
+    },
+    {
+      "date": "2025-01-22",
+      "cash": 15054.5,
+      "holdings": 96029.42,
+      "equity": 111083.92
+    },
+    {
+      "date": "2025-01-23",
+      "cash": 15054.5,
+      "holdings": 97483.54,
+      "equity": 112538.04
+    },
+    {
+      "date": "2025-01-24",
+      "cash": 15054.5,
+      "holdings": 97698.65,
+      "equity": 112753.15
+    },
+    {
+      "date": "2025-01-27",
+      "cash": 15054.5,
+      "holdings": 97127.6,
+      "equity": 112182.1
+    },
+    {
+      "date": "2025-01-28",
+      "cash": 15054.5,
+      "holdings": 95995.5,
+      "equity": 111050.0
+    },
+    {
+      "date": "2025-01-29",
+      "cash": 15054.5,
+      "holdings": 96102.99,
+      "equity": 111157.49
+    },
+    {
+      "date": "2025-01-30",
+      "cash": 15054.5,
+      "holdings": 94938.57,
+      "equity": 109993.07
+    },
+    {
+      "date": "2025-01-31",
+      "cash": 15054.5,
+      "holdings": 94769.8,
+      "equity": 109824.3
+    },
+    {
+      "date": "2025-02-03",
+      "cash": 15054.5,
+      "holdings": 94327.16,
+      "equity": 109381.66
+    },
+    {
+      "date": "2025-02-05",
+      "cash": 15054.5,
+      "holdings": 96763.51,
+      "equity": 111818.01
+    },
+    {
+      "date": "2025-02-06",
+      "cash": 15054.5,
+      "holdings": 96528.19,
+      "equity": 111582.69
+    },
+    {
+      "date": "2025-02-07",
+      "cash": 15054.5,
+      "holdings": 96526.25,
+      "equity": 111580.75
+    },
+    {
+      "date": "2025-02-10",
+      "cash": 15054.5,
+      "holdings": 96131.97,
+      "equity": 111186.47
+    },
+    {
+      "date": "2025-02-11",
+      "cash": 15054.5,
+      "holdings": 96499.5,
+      "equity": 111554.0
+    },
+    {
+      "date": "2025-02-12",
+      "cash": 15054.5,
+      "holdings": 96141.17,
+      "equity": 111195.67
+    },
+    {
+      "date": "2025-02-13",
+      "cash": 15054.5,
+      "holdings": 96982.83,
+      "equity": 112037.33
+    },
+    {
+      "date": "2025-02-14",
+      "cash": 15054.5,
+      "holdings": 97957.45,
+      "equity": 113011.95
+    },
+    {
+      "date": "2025-02-17",
+      "cash": 15054.5,
+      "holdings": 97739.01,
+      "equity": 112793.51
+    },
+    {
+      "date": "2025-02-18",
+      "cash": 15054.5,
+      "holdings": 98752.84,
+      "equity": 113807.34
+    },
+    {
+      "date": "2025-02-19",
+      "cash": 15054.5,
+      "holdings": 99475.78,
+      "equity": 114530.28
+    },
+    {
+      "date": "2025-02-20",
+      "cash": 15054.5,
+      "holdings": 99509.3,
+      "equity": 114563.8
+    },
+    {
+      "date": "2025-02-21",
+      "cash": 15054.5,
+      "holdings": 99718.19,
+      "equity": 114772.69
+    },
+    {
+      "date": "2025-02-24",
+      "cash": 15054.5,
+      "holdings": 100128.1,
+      "equity": 115182.6
+    },
+    {
+      "date": "2025-02-25",
+      "cash": 15054.5,
+      "holdings": 99868.65,
+      "equity": 114923.15
+    },
+    {
+      "date": "2025-02-26",
+      "cash": 15054.5,
+      "holdings": 100308.9,
+      "equity": 115363.4
+    },
+    {
+      "date": "2025-02-27",
+      "cash": 15054.5,
+      "holdings": 99842.49,
+      "equity": 114896.99
+    },
+    {
+      "date": "2025-05-14",
+      "cash": 15054.5,
+      "holdings": 95591.31,
+      "equity": 110645.81
+    },
+    {
+      "date": "2026-07-11",
+      "cash": 14459.35,
+      "holdings": 180481.65,
+      "equity": 194941.0
+    },
+    {
+      "date": "2026-07-12",
+      "cash": 14459.35,
+      "holdings": 180481.65,
+      "equity": 194941.0
+    },
+    {
+      "date": "2026-07-13",
+      "cash": 14459.35,
+      "holdings": 180193.14,
+      "equity": 194652.49
+    },
+    {
+      "date": "2026-07-14",
+      "cash": 14459.35,
+      "holdings": 180382.93,
+      "equity": 194842.28
+    },
+    {
+      "date": "2026-07-15",
+      "cash": 14459.35,
+      "holdings": 179932.7,
+      "equity": 194392.05
+    },
+    {
+      "date": "2026-07-16",
+      "cash": 14459.35,
+      "holdings": 181292.24,
+      "equity": 195751.59
+    },
+    {
+      "date": "2026-07-17",
+      "cash": 14459.35,
+      "holdings": 181130.55,
+      "equity": 195589.9
+    },
+    {
+      "date": "2026-07-18",
+      "cash": 14459.35,
+      "holdings": 181130.55,
+      "equity": 195589.9
+    },
+    {
+      "date": "2026-07-19",
+      "cash": 14459.35,
+      "holdings": 181130.55,
+      "equity": 195589.9
+    },
+    {
+      "date": "2026-07-20",
+      "cash": 14459.35,
+      "holdings": 180887.0,
+      "equity": 195346.35
+    },
+    {
+      "date": "2026-07-21",
+      "cash": 14459.35,
+      "holdings": 181091.71,
+      "equity": 195551.06
+    },
+    {
+      "date": "2026-07-22",
+      "cash": 14459.35,
+      "holdings": 181050.93,
+      "equity": 195510.28
+    },
+    {
+      "date": "2026-07-23",
+      "cash": 14459.35,
+      "holdings": 181490.26,
+      "equity": 195949.61
+    },
+    {
+      "date": "2026-07-24",
+      "cash": 14459.35,
+      "holdings": 181844.3,
+      "equity": 196303.65
+    },
+    {
+      "date": "2026-07-25",
+      "cash": 14459.35,
+      "holdings": 181844.3,
+      "equity": 196303.65
+    },
+    {
+      "date": "2026-07-26",
+      "cash": 14459.35,
+      "holdings": 181844.3,
+      "equity": 196303.65
+    },
+    {
+      "date": "2026-07-27",
+      "cash": 14459.35,
+      "holdings": 182575.35,
+      "equity": 197034.7
+    },
+    {
+      "date": "2026-07-28",
+      "cash": 14459.35,
+      "holdings": 183163.39,
+      "equity": 197622.74
+    },
+    {
+      "date": "2026-07-29",
+      "cash": 14459.35,
+      "holdings": 184242.13,
+      "equity": 198701.48
+    },
+    {
+      "date": "2026-07-30",
+      "cash": 14459.35,
+      "holdings": 184816.93,
+      "equity": 199276.28
+    },
+    {
+      "date": "2026-07-31",
+      "cash": 14459.35,
+      "holdings": 185172.23,
+      "equity": 199631.58
+    },
+    {
+      "date": "2026-08-03",
+      "cash": 14459.35,
+      "holdings": 186099.76,
+      "equity": 200559.11
+    },
+    {
+      "date": "2026-08-04",
+      "cash": 14459.35,
+      "holdings": 185345.56,
+      "equity": 199804.91
+    },
+    {
+      "date": "2026-08-05",
+      "cash": 14459.35,
+      "holdings": 184043.0,
+      "equity": 198502.35
+    },
+    {
+      "date": "2026-08-06",
+      "cash": 14459.35,
+      "holdings": 184232.45,
+      "equity": 198691.8
+    },
+    {
+      "date": "2026-08-07",
+      "cash": 14459.35,
+      "holdings": 184025.12,
+      "equity": 198484.47
+    },
+    {
+      "date": "2026-08-10",
+      "cash": 14459.35,
+      "holdings": 183898.69,
+      "equity": 198358.04
+    },
+    {
+      "date": "2026-08-11",
+      "cash": 14459.35,
+      "holdings": 184576.23,
+      "equity": 199035.58
+    },
+    {
+      "date": "2026-08-12",
+      "cash": 14459.35,
+      "holdings": 184931.56,
+      "equity": 199390.91
+    },
+    {
+      "date": "2026-08-13",
+      "cash": 14459.35,
+      "holdings": 186470.7,
+      "equity": 200930.05
+    },
+    {
+      "date": "2026-08-14",
+      "cash": 14459.35,
+      "holdings": 187790.35,
+      "equity": 202249.7
+    },
+    {
+      "date": "2026-08-17",
+      "cash": 14459.35,
+      "holdings": 189141.69,
+      "equity": 203601.04
+    },
+    {
+      "date": "2026-08-18",
+      "cash": 14459.35,
+      "holdings": 189629.8,
+      "equity": 204089.15
+    }
+  ],
+  "cost_drag": 2121.67,
+  "suspension_probe": {
+    "frozen_streak_events": [],
+    "bamb_excluded_by_engine": true,
+    "strategy_has_suspension_detector": false,
+    "note": "The live strategy has NO organic mechanism to detect a stock going suspended/illiquid. It relies entirely on the static config.SUSPENDED_SYMBOLS list (BAMB only). Any name not pre-listed would be held frozen indefinitely while flat/zero-volume bars print \u2014 the engine never flags it.",
+    "frozen_events_count": 0
+  },
+  "live_ledger": {
+    "sell_count": 22,
+    "closed_with_pnl": 22,
+    "wins": 16,
+    "losses": 6,
+    "win_rate_pct": 72.72727272727273,
+    "profit_factor": 8.458988628115168,
+    "realised_pnl_total": 2157.9599999999996,
+    "source": "/home/hermes/.trading/portfolio/transactions.json"
+  }
+}
