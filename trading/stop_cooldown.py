@@ -240,16 +240,28 @@ def cooldown_status(
 ) -> dict[str, Any]:
     """Re-entry status for ``symbol`` as of ``on_date`` (default: today, UTC).
 
-    Returns {"active": bool, "until": "<date>"|None, "exit_price": float|None,
+    Returns {"active": bool, "phase": "none"|"not_started"|"active"|"expired",
+    "until": "<date>"|None, "exit_price": float|None,
     "sessions_remaining": int}. ``sessions_remaining`` counts the blocked
     session(s) left INCLUDING ``on_date`` when active (5 on the first blocked
     session of a 5-session cooldown, 1 on the last). ``until`` is the last
     blocked session (inclusive); re-entry is allowed the session after.
 
+    ``phase`` names the window explicitly so the CLI never has to infer it
+    from ``active``: "none" = no (valid) entry, "not_started" = the exit
+    session itself or any date before it (elapsed 0 — the window opens the
+    NEXT session), "active" = elapsed 1..N (blocked), "expired" = elapsed
+    > N (re-entry allowed). ``active`` stays a plain boolean with unchanged
+    semantics for every date.
+
+    ``exit_price`` is the recorded price when it is a real number, else None
+    — never a fabricated 0.0 for a state entry that lacks the field.
+
     Fail-open: never raises; a corrupt/missing state file reports no cooldown.
     """
     inactive: dict[str, Any] = {
         "active": False,
+        "phase": "none",
         "until": None,
         "exit_price": None,
         "sessions_remaining": 0,
@@ -275,11 +287,16 @@ def cooldown_status(
         if on_d is None:
             on_d = _today()
         elapsed = _weekday_sessions_between(exit_d, on_d)
-        # elapsed 0        -> exit session itself / future date: window not open
-        # elapsed 1..N     -> blocked (session N is `until`, the last blocked
-        #                     session — inclusive)
-        # elapsed > N      -> window expired
-        if elapsed < 1 or elapsed > n:
+        # elapsed 0        -> exit session itself / future date: window not
+        #                     open yet ("not_started"; it OPENS next session)
+        # elapsed 1..N     -> blocked ("active"; session N is `until`, the
+        #                     last blocked session — inclusive)
+        # elapsed > N      -> window over ("expired")
+        if elapsed < 1:
+            inactive["phase"] = "not_started"
+            return inactive
+        if elapsed > n:
+            inactive["phase"] = "expired"
             return inactive
         # The date of the Nth weekday session after the exit.
         until = exit_d
@@ -288,11 +305,17 @@ def cooldown_status(
             until += timedelta(days=1)
             if until.weekday() < 5:
                 counted += 1
+        raw_px = entry.get("exit_price")
         return {
             "active": True,
+            "phase": "active",
             "until": until.isoformat(),
             "exit_date": exit_d.isoformat(),
-            "exit_price": float(entry.get("exit_price") or 0.0),
+            # A hand-edited state entry may lack exit_price: report None (the
+            # CLI renders "n/a") rather than fabricating 0.0 in a report.
+            "exit_price": float(raw_px)
+            if isinstance(raw_px, (int, float)) and not isinstance(raw_px, bool)
+            else None,
             "sessions_remaining": n - elapsed + 1,
         }
     except Exception as exc:  # noqa: BLE001 — never block the 10:30 run

@@ -427,6 +427,105 @@ def test_cli_all_shows_real_price_and_expired_marker(state_file, capsys):
     assert "0.0000" not in out, out
 
 
+# ── Phase field (t_bed91838): not_started / active / expired / none ─────────
+
+def test_phase_none_when_no_entry(state_file):
+    """No state entry at all -> phase 'none', active False."""
+    st = cooldown_status("KNRE", on_date="2026-10-19")
+    assert st["phase"] == "none"
+    assert st["active"] is False
+
+
+def test_phase_none_when_exit_date_unparseable(state_file, capsys):
+    """A hand-mangled exit_date fails open to phase 'none' and the CLI row
+    says so instead of mislabeling it 'expired'."""
+    state_file.write_text(json.dumps({
+        "version": 1,
+        "entries": {"XFAQ": {"exit_date": "not-a-date", "exit_price": 4.0,
+                             "shares": 10, "sessions": 5}},
+    }))
+    e = list_cooldowns(on_date="2026-10-19")["XFAQ"]
+    assert e["phase"] == "none"
+    assert e["active"] is False
+
+    from trading.cli.commands import stop_cooldown as cmd
+
+    rc = cmd.run(all_entries=True, on_date="2026-10-19")
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "no valid cooldown (re-entry ALLOWED)" in out, out
+    assert "expired" not in out, out
+
+
+def test_phase_not_started_on_exit_session(state_file, capsys):
+    """F1b (t_bed91838): on the exit session itself (elapsed=0) the window has
+    NOT opened — phase 'not_started', CLI renders 'window opens next session',
+    never 'expired'."""
+    record_stop_exit("KNRE", "2026-10-16", 4.0639, 1802, sessions=5)
+    st = cooldown_status("KNRE", on_date="2026-10-16")
+    assert st["phase"] == "not_started"
+    assert st["active"] is False  # unchanged semantics
+
+    from trading.cli.commands import stop_cooldown as cmd
+
+    rc = cmd.run(all_entries=True, on_date="2026-10-16")
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "window opens next session" in out, out
+    assert "expired" not in out, out
+    assert "4.0639" in out, out
+
+
+def test_phase_active_and_cli_label(state_file, capsys):
+    record_stop_exit("KNRE", "2026-10-16", 4.0639, 1802, sessions=5)
+    st = cooldown_status("KNRE", on_date="2026-10-19")
+    assert st["phase"] == "active"
+    assert st["active"] is True
+
+    from trading.cli.commands import stop_cooldown as cmd
+
+    rc = cmd.run(all_entries=True, on_date="2026-10-19")
+    out = capsys.readouterr().out
+    assert rc == 1  # plain-text rc signals active cooldowns
+    assert ("ACTIVE — 5 session(s) remaining, blocked until 2026-10-23") in out, out
+
+
+def test_phase_expired_and_cli_label(state_file, capsys):
+    record_stop_exit("KNRE", "2026-10-16", 4.0639, 1802, sessions=5)
+    st = cooldown_status("KNRE", on_date="2026-10-26")
+    assert st["phase"] == "expired"
+    assert st["active"] is False  # unchanged semantics
+
+    from trading.cli.commands import stop_cooldown as cmd
+
+    rc = cmd.run(all_entries=True, on_date="2026-10-26")
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "expired (re-entry ALLOWED)" in out, out
+
+
+def test_active_entry_without_exit_price_is_none_not_zero(state_file, capsys):
+    """F1a (t_bed91838): an ACTIVE date with a hand-edited entry lacking
+    exit_price must report None and render 'n/a' — never a fabricated
+    0.0000 in a report."""
+    record_stop_exit("KNRE", "2026-10-16", 4.0639, 1802, sessions=5)
+    data = json.loads(state_file.read_text())
+    del data["entries"]["KNRE"]["exit_price"]
+    state_file.write_text(json.dumps(data))
+
+    st = cooldown_status("KNRE", on_date="2026-10-19")
+    assert st["active"] is True
+    assert st["exit_price"] is None
+
+    from trading.cli.commands import stop_cooldown as cmd
+
+    rc = cmd.run(all_entries=True, on_date="2026-10-19")
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "n/a" in out, out
+    assert "0.0000" not in out, out
+
+
 def test_cli_stop_cooldown_list_json(state_file, capsys):
     from trading.cli.commands import stop_cooldown as cmd
 

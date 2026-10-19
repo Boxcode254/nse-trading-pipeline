@@ -55,7 +55,16 @@ def run(
 
     for sym in sorted(shown):
         e = shown[sym]
-        state = "ACTIVE" if e.get("active") else "expired (re-entry ALLOWED)"
+        # Render the row from the explicit `phase` field (never infer it from
+        # `active`): not_started = the exit session itself / pre-window, where
+        # ALLOWED is true but the window has not opened yet.
+        phase = str(e.get("phase") or "none")
+        state = {
+            "not_started": "window opens next session",
+            "active": "ACTIVE",
+            "expired": "expired (re-entry ALLOWED)",
+            "none": "no valid cooldown (re-entry ALLOWED)",
+        }.get(phase, "no valid cooldown (re-entry ALLOWED)")
         # Never render a fabricated 0.0000 for a price the module does not
         # have: print the recorded price when it is a number, "n/a" otherwise.
         px = e.get("exit_price")
@@ -66,7 +75,7 @@ def run(
             f"  {sym:<6s} exited {e.get('exit_date')} @ KES "
             f"{px_s}  {state}"
         )
-        if e.get("active"):
+        if phase == "active":
             line += (
                 f" — {e.get('sessions_remaining')} session(s) remaining, "
                 f"blocked until {e.get('until')}"
