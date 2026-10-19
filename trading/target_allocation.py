@@ -54,6 +54,7 @@ if _TRADING_ROOT not in sys.path:
 
 from trading import config
 from trading import risk_profiles as rp
+from trading.stop_cooldown import cooldown_status
 
 # === POLICY TRIPWIRE (do not remove) ===
 # This engine may read ONLY portfolio state + prices (MTM) + risk weights.
@@ -745,6 +746,33 @@ def generate_rebalance_plan(
     current_stocks = set(pos_map.keys())
     total_value = weights["total_value"]
 
+    # Stop-loss re-entry cooldown skips (KNRE incident: stop-out 2026-10-16,
+    # re-bought 2026-10-19 purely on sector underweight). Collected during the
+    # BUY loops below and appended to violations at the end so the auto-trader
+    # reports them as skips. Fail-open: cooldown_status never raises.
+    cooldown_skips: list[dict[str, Any]] = []
+
+    def _cooldown_skip(sym: str) -> bool:
+        """True when ``sym`` is in a stop-loss re-entry cooldown right now.
+
+        Records a SKIP violation naming the exit date and sessions remaining.
+        """
+        cd = cooldown_status(sym)
+        if not cd.get("active"):
+            return False
+        cooldown_skips.append({
+            "severity": "SKIP",
+            "symbol": sym,
+            "type": "STOP_COOLDOWN",
+            "message": (
+                f"Stop-loss re-entry cooldown: exited {cd.get('exit_date')} "
+                f"@ KES {cd.get('exit_price', 0.0):.4f}; "
+                f"{cd.get('sessions_remaining', 0)} session(s) remaining "
+                f"(blocked until {cd.get('until')})"
+            ),
+        })
+        return True
+
     # === SELL signals: over-weight sectors ===
     for sec, info in targets["current"].items():
         if info["action"] != "trim":
@@ -819,6 +847,10 @@ def generate_rebalance_plan(
         for sym in info["stocks_in_sector"]:
             if sym in current_stocks:
                 continue  # Already holding — allocation covers it
+            # Stop-loss re-entry cooldown: never re-enter a name we just
+            # stopped out of, no matter how underweight the sector is.
+            if _cooldown_skip(sym):
+                continue
             # New position — check signal gate (learned BUY gate; fail-open to base)
             sig = signal_map.get(sym, 50)
             if sig < learned_gate_for(sym, kind="buy"):
@@ -874,6 +906,9 @@ def generate_rebalance_plan(
         )
         for sym in held_in_sector_syms:
             # We already hold this, but sector is under target — top up
+            # Stop-loss re-entry cooldown applies to top-ups too.
+            if _cooldown_skip(sym):
+                continue
             sig = signal_map.get(sym, 50)
             if sig < learned_gate_for(sym, kind="buy"):
                 continue
@@ -956,6 +991,9 @@ def generate_rebalance_plan(
 
     # Concentration guardrails (high cap + low floor)
     violations = validate_plan_constraints(weights, targets, trades, portfolio)
+    # Append stop-loss re-entry cooldown skips so the auto-trader surfaces
+    # them (it reports plan["violations"] as skips in its step-2 loop).
+    violations = list(violations) + cooldown_skips
 
     return {
         "trades": trades,

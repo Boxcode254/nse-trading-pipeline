@@ -52,6 +52,7 @@ from .commands import (
     summary,
     target_allocation as target_cmd,
     execute,
+    stop_cooldown as stop_cooldown_cmd,
 )
 
 # ── App ─────────────────────────────────────────────────────────────────
@@ -695,6 +696,29 @@ def monthly_report_cmd(
     raise typer.Exit(monthly_report.run(
         months=months, telegram=telegram, save=save, output=output,
         quiet=quiet, as_json=as_json,
+    ))
+
+
+# ── Stop-loss re-entry cooldown ────────────────────────────────────────
+stop_cooldown_app = typer.Typer(help="Stop-loss re-entry cooldowns (read-only).")
+app.add_typer(stop_cooldown_app, name="stop-cooldown")
+
+
+@stop_cooldown_app.command("list")
+def stop_cooldown_list(
+    all_entries: bool = typer.Option(
+        False, "--all", "-a",
+        help="Include expired cooldowns, not just active ones.",
+    ),
+    on_date: Optional[str] = typer.Option(
+        None, "--on", help="Evaluate status as of DATE (YYYY-MM-DD) instead of today."
+    ),
+    quiet: bool = typer.Option(False, "--quiet", "-q", help="Minimal output."),
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON."),
+) -> None:
+    """List stop-loss re-entry cooldowns (symbols blocked after a stop-out)."""
+    raise typer.Exit(stop_cooldown_cmd.run(
+        as_json=as_json, quiet=quiet, all_entries=all_entries, on_date=on_date,
     ))
 
 
