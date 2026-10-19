@@ -302,7 +302,130 @@ def test_replay_knre_rebuy_allowed_after_cooldown_expires(state_file, monkeypatc
     assert _plan_knre_buys(plan), "expired cooldown must not block re-entry"
 
 
+# ── TOP-UP GUARD (target_allocation.py, holdings-in-underweight-sector branch) ─
+#
+# The new-position replay above only exercises the BUY loop for symbols NOT
+# held. KNRE is currently HELD again (re-bought 2026-10-19 after the gate
+# expired), so the guard that actually protects this week's book is the
+# top-up branch: a held symbol in an underweight sector getting added to.
+
+from trading.target_allocation import generate_rebalance_plan  # noqa: E402
+
+
+def _topup_book() -> dict:
+    """KNRE already held at a small size; insurance far under target.
+
+    Insurance (KNRE+BRIT, target 7.59%, tolerance 2.0%) sits at ~2.07% of the
+    100,000 book — below target-tolerance (5.59%) — so the top-up branch WOULD
+    add to the held KNRE. BRIT is deliberately not held so the sector's
+    per-stock target lands on KNRE alone.
+    """
+    knre_value = 500 * 4.1462  # 2,073.10
+    return {
+        "cash": 100000.0 - knre_value - 16500.0 - 11500.0,
+        "initial_capital": 100000.0,
+        "positions": [
+            {"symbol": "KNRE", "shares": 500, "avg_cost": 4.1462,
+             "current_value": knre_value},
+            {"symbol": "KCB", "shares": 500, "avg_cost": 30.0,
+             "current_value": 16500.0},
+            {"symbol": "EABL", "shares": 50, "avg_cost": 220.0,
+             "current_value": 11500.0},
+        ],
+        "total_value": 100000.0,
+    }
+
+
+def test_replay_topup_of_cooled_knre_blocked(state_file, monkeypatch):
+    """Active cooldown must block a TOP-UP of an already-held KNRE."""
+    monkeypatch.setattr(sc, "_today", lambda: date(2026, 10, 19))
+    record_stop_exit("KNRE", "2026-10-16", 4.0639, 1802, sessions=5)
+
+    plan = generate_rebalance_plan(
+        signals=[dict(s) for s in _SIGNALS],
+        prices=dict(_INCIDENT_PRICES),
+        portfolio=_topup_book(),
+        dry_run=True,
+    )
+    knre_buys = _plan_knre_buys(plan)
+    assert knre_buys == [], (
+        "cooled KNRE must not be topped up either, got: "
+        f"{[t['reason'] for t in knre_buys]}"
+    )
+    skips = [v for v in plan["violations"] if v.get("type") == "STOP_COOLDOWN"]
+    assert skips, "expected a STOP_COOLDOWN skip explaining the top-up block"
+    assert "2026-10-16" in skips[0]["message"], skips[0]["message"]
+    # The guard must not bleed into other names' top-ups (KCB banking top-up
+    # is still expected for this book).
+    assert any(t["symbol"] == "KCB" and t["side"] == "BUY" for t in plan["trades"])
+
+
+def test_replay_topup_of_knre_returns_without_cooldown(state_file, monkeypatch):
+    """Same book, no state file => the KNRE top-up BUY comes back."""
+    monkeypatch.setattr(sc, "_today", lambda: date(2026, 10, 19))
+    assert not state_file.exists()
+
+    plan = generate_rebalance_plan(
+        signals=[dict(s) for s in _SIGNALS],
+        prices=dict(_INCIDENT_PRICES),
+        portfolio=_topup_book(),
+        dry_run=True,
+    )
+    knre = _plan_knre_buys(plan)
+    assert knre, "without a cooldown the KNRE top-up must fire"
+    assert knre[0]["delta_shares"] >= 1
+    assert knre[0]["reason"].startswith("Top-up KNRE"), knre[0]["reason"]
+    assert not [v for v in plan["violations"] if v.get("type") == "STOP_COOLDOWN"]
+
+
 # ── CLI visibility ──────────────────────────────────────────────────────────
+
+def test_expired_entry_keeps_recorded_exit_price(state_file):
+    """F1 (t_aad40de5): the INACTIVE status dict carries exit_price=None; the
+    list_cooldowns merge must never let a None status field clobber the
+    recorded value — the operator reads this report."""
+    record_stop_exit("KNRE", "2026-10-16", 4.0639, 1802, sessions=5)
+    for on_date in ("2026-10-16", "2026-10-26"):  # not-yet-elapsed / expired
+        e = list_cooldowns(on_date=on_date)["KNRE"]
+        assert e["active"] is False, on_date
+        assert e["exit_price"] == pytest.approx(4.0639), on_date
+        assert e["exit_date"] == "2026-10-16"
+        assert e["shares"] == 1802
+        assert e["sessions"] == 5
+
+
+def test_cli_all_shows_real_price_and_expired_marker(state_file, capsys):
+    """`list --all` on an expired entry: real exit price, expired/ALLOWED
+    marker, exit 0 — and never a fabricated 0.0000."""
+    from trading.cli.commands import stop_cooldown as cmd
+
+    record_stop_exit("KNRE", "2026-10-16", 4.0639, 1802, sessions=5)
+    rc = cmd.run(all_entries=True, on_date="2026-10-26")
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "4.0639" in out, out
+    assert "expired (re-entry ALLOWED)" in out, out
+    assert "0.0000" not in out, out
+
+    # Same for the not-yet-elapsed view
+    rc = cmd.run(all_entries=True, on_date="2026-10-16")
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "4.0639" in out, out
+
+    # An entry with no recorded price renders "n/a", never 0.0000
+    state_file.write_text(json.dumps({
+        "version": 1,
+        "entries": {"XFAQ": {"exit_date": "2026-10-16", "shares": 10,
+                             "sessions": 5,
+                             "recorded_at": "2026-10-19T00:00:00+00:00"}},
+    }))
+    rc = cmd.run(all_entries=True, on_date="2026-10-26")
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "n/a" in out, out
+    assert "0.0000" not in out, out
+
 
 def test_cli_stop_cooldown_list_json(state_file, capsys):
     from trading.cli.commands import stop_cooldown as cmd

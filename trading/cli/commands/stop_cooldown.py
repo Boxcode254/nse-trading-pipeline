@@ -55,10 +55,16 @@ def run(
 
     for sym in sorted(shown):
         e = shown[sym]
-        state = "ACTIVE" if e.get("active") else "expired"
+        state = "ACTIVE" if e.get("active") else "expired (re-entry ALLOWED)"
+        # Never render a fabricated 0.0000 for a price the module does not
+        # have: print the recorded price when it is a number, "n/a" otherwise.
+        px = e.get("exit_price")
+        px_s = (f"{px:.4f}"
+                if isinstance(px, (int, float)) and not isinstance(px, bool)
+                else "n/a")
         line = (
             f"  {sym:<6s} exited {e.get('exit_date')} @ KES "
-            f"{e.get('exit_price', 0.0):.4f}  {state}"
+            f"{px_s}  {state}"
         )
         if e.get("active"):
             line += (

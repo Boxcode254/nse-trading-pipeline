@@ -37,8 +37,8 @@ count would give. Fail-safe direction: blocks re-entry slightly longer,
 never shorter.
 
 Window semantics: the cooldown covers the N weekday sessions AFTER the exit
-session. The last blocked session (``until``) is EXCLUSIVE — re-entry is
-allowed the session AFTER ``until``. Example: exit Friday 2026-10-16 with
+session. ``until`` is the last blocked session (inclusive); re-entry is
+allowed the session after. Example: exit Friday 2026-10-16 with
 sessions=5 blocks Mon 19 through Fri 23 (until=2026-10-23); the first
 allowed session is Mon 2026-10-26.
 
@@ -244,7 +244,7 @@ def cooldown_status(
     "sessions_remaining": int}. ``sessions_remaining`` counts the blocked
     session(s) left INCLUDING ``on_date`` when active (5 on the first blocked
     session of a 5-session cooldown, 1 on the last). ``until`` is the last
-    blocked session and is EXCLUSIVE: re-entry is allowed the session after it.
+    blocked session (inclusive); re-entry is allowed the session after.
 
     Fail-open: never raises; a corrupt/missing state file reports no cooldown.
     """
@@ -276,7 +276,8 @@ def cooldown_status(
             on_d = _today()
         elapsed = _weekday_sessions_between(exit_d, on_d)
         # elapsed 0        -> exit session itself / future date: window not open
-        # elapsed 1..N     -> blocked (session N is the exclusive `until`)
+        # elapsed 1..N     -> blocked (session N is `until`, the last blocked
+        #                     session — inclusive)
         # elapsed > N      -> window expired
         if elapsed < 1 or elapsed > n:
             return inactive
@@ -313,12 +314,16 @@ def list_cooldowns(
     out: dict[str, dict[str, Any]] = {}
     for sym, entry in (state.get("entries") or {}).items():
         status = cooldown_status(sym, on_date=on_date, path=path)
-        out[sym] = {
+        merged: dict[str, Any] = {
             "exit_date": entry.get("exit_date"),
             "exit_price": entry.get("exit_price"),
             "shares": entry.get("shares"),
             "sessions": entry.get("sessions"),
             "recorded_at": entry.get("recorded_at"),
-            **status,
         }
+        # A status field that is None (e.g. the inactive result carries
+        # exit_price=None) must NEVER clobber a recorded value — an expired
+        # entry still has a real recorded exit price the operator reads.
+        merged.update({k: v for k, v in status.items() if v is not None})
+        out[sym] = merged
     return out
