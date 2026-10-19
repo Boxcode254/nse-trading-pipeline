@@ -623,6 +623,56 @@ def _current_drawdown_pct(portfolio_dir: Path | None = None) -> float:
     return 0.0
 
 
+def _maybe_record_stop_exit(trade: dict, symbol: str, price: float, shares: int) -> None:
+    """Record a stop-loss re-entry cooldown after a FILLED stop-loss sell.
+
+    Called ONLY from the live (non-dry-run) fill-confirmation path (step 7),
+    keyed on the trade's ``stop_loss=True`` flag — never for take-profit,
+    sector-cap sells, blocked orders, gap-deferred orders, or rejected fills.
+    Skipped in replay mode so sandbox replays never touch production state.
+    Fail-open: recording must never crash the 10:30 run.
+    """
+    if not trade.get("stop_loss"):
+        return
+    if replay_module.is_replay():
+        logging.info(
+            "[REPLAY] stop-cooldown recording skipped for %s (sandbox)", symbol
+        )
+        return
+    try:
+        from trading.stop_cooldown import record_stop_exit
+
+        exit_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        record_stop_exit(symbol, exit_date, float(price), int(shares))
+    except Exception as exc:  # noqa: BLE001
+        logging.warning(
+            "stop-cooldown recording failed for %s (non-fatal): %s", symbol, exc
+        )
+
+
+def _format_plan_violation(v: dict) -> tuple[str, str]:
+    """Normalise a plan violation dict to ``(symbol, rendered_reason)``.
+
+    Key contract mismatch guard (2026-10-19 "[WARN] CONSTRAINT: " bug):
+    validate_plan_constraints emits {level, kind, detail} while cooldown-skips
+    emit {severity, type, message} — read BOTH spellings, fall back to the
+    violation kind/sector stats when no human message exists, and NEVER
+    return a reason that renders as "[WARN] CONSTRAINT: " with nothing
+    after the colon.
+    """
+    sv = str(v.get("severity") or v.get("level") or "WARN").upper()
+    sym = v.get("symbol") or "PORTFOLIO"
+    vtype = v.get("type") or v.get("kind") or "CONSTRAINT"
+    msg = (v.get("message") or v.get("detail") or "").strip()
+    if not msg:
+        msg = f"{vtype} on {v.get('sector') or 'portfolio'}"
+        if v.get("limit_pct") is not None:
+            msg += (
+                f" (current {v.get('current_pct')}%, limit {v.get('limit_pct')}%)"
+            )
+    return sym, f"[{sv}] {vtype}: {msg}"
+
+
 def run_auto_trade(dry_run: bool = False) -> AutoTraderReport:
     """Execute the day's allocation recommendations in the paper portfolio.
 
@@ -782,10 +832,11 @@ def run_auto_trade(dry_run: bool = False) -> AutoTraderReport:
     try:
         plan = generate_rebalance_plan(dry_run=True)
         # Check for plan-level constraint violations before processing trades
+        # Key contract mismatch guard: see _format_plan_violation docstring —
+        # never render "[WARN] CONSTRAINT: " with an empty message.
         for v in plan.get("violations", []):
-            sv = v.get("severity", "WARN")
-            sym = v.get("symbol", "PORTFOLIO")
-            report.add_skip(sym, f"[{sv}] {v.get('type', 'CONSTRAINT')}: {v.get('message', '')}")
+            sym, rendered = _format_plan_violation(v)
+            report.add_skip(sym, rendered)
         for t in plan.get("trades", []):
             delta = _plan_delta(t)
             if delta <= 0:
@@ -1020,6 +1071,43 @@ def run_auto_trade(dry_run: bool = False) -> AutoTraderReport:
                             s["_skip_gap"] = True
                             break
 
+    # 6b. Defensive stop-loss re-entry cooldown filter over buy_list.
+    #     target_allocation already skips cooled symbols at BOTH its BUY
+    #     branches, but this final filter guarantees no future producer can
+    #     bypass the cooldown: (a) any symbol with an active stop_cooldown
+    #     entry, and (b) any symbol with a stop-loss sell executing THIS
+    #     session (same-run re-entry guard: the exit is recorded at fill
+    #     time, after this filter runs, so the flag on sell_list is what
+    #     blocks the same-day buy-back). Fail-open: never blocks the run.
+    try:
+        from trading.stop_cooldown import cooldown_status
+
+        _stop_sells_this_run = {
+            s["symbol"] for s in sell_list if s.get("stop_loss")
+        }
+        _kept_buys: list[dict] = []
+        for b in buy_list:
+            _cd = cooldown_status(b["symbol"])
+            if _cd.get("active"):
+                report.add_skip(
+                    b["symbol"],
+                    f"Stop-loss re-entry cooldown: exited {_cd.get('exit_date')} "
+                    f"@ KES {_cd.get('exit_price', 0.0):.4f}; "
+                    f"{_cd.get('sessions_remaining', 0)} session(s) remaining "
+                    f"(blocked until {_cd.get('until')})",
+                )
+            elif b["symbol"] in _stop_sells_this_run:
+                report.add_skip(
+                    b["symbol"],
+                    "Stop-loss sell executing this session — re-entry blocked "
+                    "until the cooldown is recorded",
+                )
+            else:
+                _kept_buys.append(b)
+        buy_list = _kept_buys
+    except Exception as exc:  # noqa: BLE001 — fail-open, never block the run
+        logging.warning("stop-cooldown buy filter failed (non-fatal): %s", exc)
+
     # 7. Execute sells first (to free cash for buys)
     # We'll use a shared ExecutionEngine for live trades (non-dry_run)
     if not dry_run:
@@ -1090,6 +1178,10 @@ def run_auto_trade(dry_run: bool = False) -> AutoTraderReport:
                 report_engine = engine.execute(order)
                 if report_engine.success:
                     report.add_sell(sym, sell_shares, price, sell_value, sell["reason"])
+                    # FILLED stop-loss sell → start the re-entry cooldown
+                    # (only fires when sell["stop_loss"] is set; take-profit,
+                    # sector-cap and plan sells never record).
+                    _maybe_record_stop_exit(sell, sym, price, sell_shares)
                     # Update cash and holdings from the broker after the trade
                     acct_after = engine.broker.get_account()
                     positions_after = engine.broker.get_positions()
