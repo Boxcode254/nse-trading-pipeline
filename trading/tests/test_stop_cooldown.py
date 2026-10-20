@@ -535,7 +535,11 @@ def test_cli_stop_cooldown_list_json(state_file, capsys):
     from trading.cli.commands import stop_cooldown as cmd
 
     record_stop_exit("KNRE", "2026-10-16", 4.0639, 1802, sessions=5)
-    rc = cmd.run(as_json=True)
+    # on_date pinned (date-rot fix, t_326ee74d session): this test relied on
+    # wall-clock today and started failing once the calendar moved past the
+    # exit+1 session (sessions_remaining 4 != 5). Every sibling test in this
+    # module pins 2026-10-19; do the same here.
+    rc = cmd.run(as_json=True, on_date="2026-10-19")
     out = capsys.readouterr().out
     assert rc == 0
     data = json.loads(out)

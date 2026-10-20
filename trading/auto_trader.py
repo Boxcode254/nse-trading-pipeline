@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import sys
 import time
@@ -674,6 +675,33 @@ def _format_plan_violation(v: dict) -> tuple[str, str]:
     return sym, f"[{sv}] {vtype}: {msg}"
 
 
+def _min_trade_skip(sell: dict, sell_value: float) -> str | None:
+    """Honest skip message when a sell is below MIN_TRADE_KES, else None.
+
+    t_326ee74d: a hard-cap trim below the minimum trade size must NOT be
+    dropped with a generic "Sell too small" — the operator would read a
+    routine cost skip when the real story is a persisting cap breach. The
+    cap-trim variant names the sector, the breach and states plainly that
+    the breach cannot be corrected by a trade this session. (Policy: cap
+    enforcement wins over the min-trade cost heuristic at PLAN level — the
+    plan sizes cap trims >= MIN_TRADE_KES whenever the math allows — but the
+    executor never executes below-minimum orders; a genuinely sub-minimum
+    required trim is surfaced honestly instead.)
+    """
+    if sell_value >= config.MIN_TRADE_KES:
+        return None
+    if sell.get("sector_cap") or sell.get("hard_cap_trim"):
+        return (
+            f"HARD_CAP trim too small to execute: KES {sell_value:,.0f} to clear "
+            f"{sell.get('sector') or 'sector'} hard cap "
+            f"({float(sell.get('sector_pct') or 0):.2f}% vs hard cap "
+            f"{float(sell.get('cap_hard_pct') or 0):.0f}%) is below MIN_TRADE_KES "
+            f"{config.MIN_TRADE_KES:,.0f} — cap breach cannot be corrected by a "
+            f"trade this session"
+        )
+    return f"Sell too small (KES {sell_value:,.0f})"
+
+
 def _apply_cooldown_buy_filter(
     buy_list: list[dict],
     sell_list: list[dict],
@@ -754,7 +782,10 @@ def run_auto_trade(dry_run: bool = False) -> AutoTraderReport:
     -------
     AutoTraderReport with all actions taken.
     """
-    from trading.target_allocation import generate_rebalance_plan
+    from trading.target_allocation import (
+        generate_rebalance_plan,
+        hard_cap_required_sale_value,
+    )
 
     report = AutoTraderReport()
 
@@ -927,6 +958,15 @@ def run_auto_trade(dry_run: bool = False) -> AutoTraderReport:
                         reason=t["reason"],
                         stop_loss=False,
                         sector_cap=False,
+                        # t_326ee74d: keep hard-cap trim metadata so the
+                        # executor's min-trade filter can report an honest
+                        # "cannot be corrected this session" message instead
+                        # of a bare "Sell too small", and so step 5 knows the
+                        # sector already has its cap trim queued.
+                        hard_cap_trim=bool(t.get("hard_cap_trim")),
+                        sector=t.get("sector", ""),
+                        sector_pct=t.get("sector_pct"),
+                        cap_hard_pct=t.get("cap_hard_pct"),
                     )
                 )
         if not buy_list and not sell_list:
@@ -1017,39 +1057,71 @@ def run_auto_trade(dry_run: bool = False) -> AutoTraderReport:
     #     so a winning sector (e.g. banking trending up) is NOT force-trimmed at
     #     HARD; only fading/over-weight sectors get trimmed. Risk-bounded, not
     #     winner-punishing.
+    #     t_326ee74d: the plan (target_allocation) already emits fixed-point-
+    #     sized executable cap trims — sectors it covered are skipped so the
+    #     trim is never doubled. This is the FALLBACK for breaches the plan
+    #     could not size (e.g. the plan engine failed above), and it now ALSO
+    #     solves the post-trade ratio (selling shrinks the denominator): the
+    #     old single-step excess sized a KES 316 SCBK sale where ~KES 1,023
+    #     (~4 SCBK shares) is required, which the executor then dropped as
+    #     "Sell too small" — the breach persisted every session.
     for sec, pct in sector_pcts.items():
         cap = config.sector_cap(sec)
         hard = cap["hard"]
-        if pct > hard:
-            excess_pct = pct - hard
-            excess_val = total_before * (excess_pct / 100)
-            # Find holdings in this sector, biggest first
-            sector_holdings = sorted(
-                [p for p in current_positions if _sector_of(p["symbol"]) == sec],
-                key=lambda x: -(x.get("current_value", 0) or x["shares"] * x["avg_cost"]),
-            )
-            remaining = excess_val
-            for p in sector_holdings:
-                if remaining <= 0:
-                    break
-                sym = p["symbol"]
-                # If already in sell list, skip (already being reduced)
-                if any(s["symbol"] == sym for s in sell_list):
-                    continue
-                current_val = p.get("current_value", 0) or p["shares"] * p["avg_cost"]
-                # Calculate how many shares to sell to bring sector under cap
-                sell_fraction = min(remaining / current_val, 1.0) if current_val > 0 else 0
-                sell_list.append(
-                    dict(
-                        symbol=sym,
-                        delta_shares=0,  # sized in step 7 via sector_cap path
-                        target_pct=_pct(current_val - remaining, total_before),
-                        reason=f"Sector cap: {sec} at {pct:.0f}% exceeds {hard:.0f}% limit",
-                        sector_cap=True,
-                        excess_pct=pct - hard,
-                    )
+        if pct <= hard:
+            continue
+        if any(
+            s.get("sector_cap") or s.get("hard_cap_trim") or s.get("sector") == sec
+            for s in sell_list
+        ):
+            continue  # a trim for this sector is already queued
+        sec_value = sum(
+            p.get("current_value", 0) or p["shares"] * p["avg_cost"]
+            for p in current_positions
+            if _sector_of(p["symbol"]) == sec
+        )
+        other_sells = sum(
+            (s.get("delta_shares") or 0) * (prices.get(s["symbol"]) or 0)
+            for s in sell_list
+            if _sector_of(s["symbol"]) != sec
+        )
+        required = hard_cap_required_sale_value(
+            sec_value, total_before, hard, other_sells=other_sells
+        )
+        remaining = required
+        # Find holdings in this sector, biggest first
+        sector_holdings = sorted(
+            [p for p in current_positions if _sector_of(p["symbol"]) == sec],
+            key=lambda x: -(x.get("current_value", 0) or x["shares"] * x["avg_cost"]),
+        )
+        for p in sector_holdings:
+            if remaining <= 0.005:
+                break
+            sym = p["symbol"]
+            # If already in sell list, skip (already being reduced)
+            if any(s["symbol"] == sym for s in sell_list):
+                continue
+            price = prices.get(sym) or 0
+            if price <= 0:
+                continue
+            n = min(int(p["shares"]), max(1, math.ceil(remaining / price)))
+            if n <= 0:
+                continue
+            sell_list.append(
+                dict(
+                    symbol=sym,
+                    delta_shares=n,
+                    reason=(f"Sector cap: {sec} at {pct:.2f}% exceeds {hard:.0f}% limit "
+                            f"— post-trade sized trim (KES {n * price:,.0f})"),
+                    stop_loss=False,
+                    sector_cap=True,
+                    sector=sec,
+                    sector_pct=pct,
+                    cap_hard_pct=hard,
+                    excess_pct=pct - hard,
                 )
-                remaining -= current_val
+            )
+            remaining -= n * price
 
     # 6. 🟢 Gap Risk Filter — skip trades where a price gap makes the signal stale
     #    Calls Mansa quote endpoint per candidate (not movers list) so every
@@ -1193,8 +1265,12 @@ def run_auto_trade(dry_run: bool = False) -> AutoTraderReport:
             report.add_skip(sym, "No price data")
             continue
         sell_value = sell_shares * price
-        if sell_value < config.MIN_TRADE_KES:
-            report.add_skip(sym, f"Sell too small (KES {sell_value:,.0f})")
+        # t_326ee74d: honest skip for below-minimum sells — a hard-cap trim
+        # that cannot clear MIN_TRADE_KES says so explicitly instead of a
+        # bare "Sell too small" that hides a persisting cap breach.
+        skip_msg = _min_trade_skip(sell, sell_value)
+        if skip_msg:
+            report.add_skip(sym, skip_msg)
             continue
 
         # Safety on sells (emergency stop / manual block / trade size)

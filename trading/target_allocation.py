@@ -43,6 +43,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any, Optional
@@ -393,6 +394,231 @@ def validate_plan_constraints(
     return violations
 
 
+
+
+def hard_cap_required_sale_value(
+    sector_value: float,
+    total_value: float,
+    hard_pct: float,
+    *,
+    other_sells: float = 0.0,
+) -> float:
+    """Minimum KES to sell from a sector so its POST-trade weight <= hard_pct.
+
+    The cap test is a ratio and the denominator shrinks with the sale, so a
+    single-step delta (``sector_value - hard_pct% * total``) UNDERsizes the
+    trim (t_326ee74d: it produced a KES 316 sale where ~KES 1,023 is required).
+    This solves the post-trade inequality by fixed-point iteration:
+
+        (sector_value - x) / (total_value - other_sells - x) <= hard_pct/100
+
+    starting from the (wrong) single-step delta and, each round, adding the
+    residual overshoot divided by (1 - h) — the exact solve of
+    ``(V - x - d) = h * (T - x - d)`` — until the post-trade weight actually
+    clears the cap (converges in a handful of rounds for any sane cap < 100%).
+    ``other_sells`` is KES already queued for sale in OTHER sectors; those
+    shrink the denominator too and must be accounted for.
+    """
+    h = hard_pct / 100.0
+    t_eff = float(total_value) - float(other_sells)
+    if h >= 1.0 or t_eff <= 0 or sector_value <= 0:
+        return 0.0
+    x = max(0.0, float(sector_value) - h * t_eff)  # single-step delta: first guess
+    for _ in range(100):
+        post_total = t_eff - x
+        if post_total <= 0:
+            return 0.0
+        overshoot = (float(sector_value) - x) - h * post_total
+        if overshoot <= 0.005:
+            break
+        x += overshoot / (1.0 - h)
+    return x
+
+
+def _enforce_hard_cap_trims(
+    trades: list[dict[str, Any]],
+    weights: dict[str, Any],
+    prices: dict[str, float],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Force an EXECUTABLE trim onto the plan for every HARD cap breach.
+
+    Policy (t_326ee74d): cap enforcement wins over the min-trade cost
+    heuristic. For each sector over its hard cap:
+
+      * the trim is sized by fixed-point iteration on the post-trade ratio
+        (:func:`hard_cap_required_sale_value`), rounded UP to whole shares,
+        so the recomputed post-trade sector weight is <= the hard cap;
+      * the trim is >= MIN_TRADE_KES whenever the required sale allows it,
+        so the executor's min-trade filter can never silently drop it;
+      * when even the minimal 1-share trim is below MIN_TRADE_KES (tiny
+        breach), the trim is STILL emitted together with an explicit
+        HARD_CAP_SUBMIN exception naming the breach size — the executor
+        then skips it with an honest "cannot be corrected this session"
+        message, and HARD_CAP_NO_TRIM is never raised for it (a trim DOES
+        exist in the plan).
+
+    Multi-breach books re-solve after each trim (later breaches see the
+    denominator shrink from earlier ones), up to 3 passes until stable.
+
+    Returns ``(trades, exceptions)`` — exceptions are validate-style
+    violation dicts to append to the plan's violations.
+    """
+    exceptions: list[dict[str, Any]] = []
+    sectors = weights.get("sectors", {})
+    total_value = float(weights.get("total_value", 0.0))
+    if total_value <= 0:
+        return trades, exceptions
+
+    min_trade = float(config.MIN_TRADE_KES)
+
+    breaches = []
+    for sec, info in sectors.items():
+        cur = float(info.get("pct", 0.0))
+        hard = float(config.sector_cap(sec)["hard"])
+        if cur > hard:
+            breaches.append((cur - hard, sec, info, hard, cur))
+    breaches.sort(key=lambda b: -b[0])
+
+    for _pass in range(3):
+        adjusted = False
+        for overshoot, sec, info, hard, cur in breaches:
+            sec_value = float(info.get("value", 0.0))
+            other = sum(
+                float(t.get("value", 0.0))
+                for t in trades
+                if t["side"] == "SELL" and t.get("sector") != sec
+            )
+            already = sum(
+                float(t.get("value", 0.0))
+                for t in trades
+                if t["side"] == "SELL" and t.get("sector") == sec
+            )
+            required = hard_cap_required_sale_value(
+                sec_value, total_value, hard, other_sells=other
+            )
+            if required <= already + 0.005:
+                continue
+            need = required - already
+            stocks = info.get("stocks", {})
+            # Sellable candidates: held, not suspended, price known, and not
+            # already queued for a full exit. Largest first; an existing
+            # partial trim in this sector is topped up before a new SELL line
+            # is opened, so the plan keeps one trim per name.
+            candidates = []
+            for sym, st in stocks.items():
+                if sym in SUSPENDED:
+                    continue
+                held = int(st.get("shares") or 0)
+                if held <= 0:
+                    continue
+                price = float(prices.get(sym) or st.get("avg_cost") or 0)
+                if price <= 0:
+                    continue
+                queued = sum(
+                    int(t.get("delta_shares") or 0)
+                    for t in trades
+                    if t["side"] == "SELL" and t.get("symbol") == sym
+                )
+                room = held - queued
+                if room <= 0:
+                    continue
+                candidates.append(
+                    (float(st.get("value", held * price)), sym, held, price, room)
+                )
+            if not candidates:
+                # Nothing sellable in this sector — a plan cannot fix what has
+                # no exit; the (truthful) HARD_CAP_NO_TRIM from
+                # validate_plan_constraints stands.
+                continue
+            candidates.sort(key=lambda c: (-c[0], c[1]))
+            touched = []
+            partial = False
+            while need > 0.005 and candidates:
+                _, sym, held, price, room = candidates.pop(0)
+                existing = next(
+                    (
+                        t for t in trades
+                        if t["side"] == "SELL" and t.get("symbol") == sym
+                    ),
+                    None,
+                )
+                n = min(room, max(1, math.ceil(need / price)))
+                if n <= 0:
+                    continue
+                need -= n * price
+                if existing is not None and int(existing.get("delta_shares", 0)) + n <= held:
+                    # top up the queued partial trim into a hard-cap trim
+                    existing["delta_shares"] = int(existing["delta_shares"]) + n
+                    existing["shares"] = existing["delta_shares"]
+                    existing["value"] = round(float(existing["delta_shares"]) * price, 2)
+                    trade = existing
+                else:
+                    trade = {
+                        **_delta_trade(
+                            symbol=sym,
+                            side="SELL",
+                            delta_shares=n,
+                            price=price,
+                            reason=(
+                                f"HARD cap trim: {sec} at {cur:.1f}% exceeds hard "
+                                f"cap {hard:.0f}% — sized to post-trade <= cap"
+                            ),
+                            sector=sec,
+                        ),
+                        "hard_cap_trim": True,
+                        "sector_pct": cur,
+                        "cap_hard_pct": hard,
+                    }
+                    trades.append(trade)
+                trade["hard_cap_trim"] = True
+                trade["sector_pct"] = cur
+                trade["cap_hard_pct"] = hard
+                trade["reason"] = (
+                    f"HARD cap trim: {sec} at {cur:.1f}% exceeds hard cap "
+                    f"{hard:.0f}% — sized to post-trade <= cap"
+                )
+                touched.append(trade)
+                adjusted = True
+                if need > 0.005:
+                    partial = True  # this candidate exhausted; next one continues
+            for trade in touched:
+                if float(trade.get("value", 0.0)) < min_trade:
+                    # Tiny breach: the required trim is below the executor's
+                    # MIN_TRADE_KES floor and WILL be skipped at execution.
+                    # Do not silently drop it and do not inflate it either —
+                    # emit the minimal trim plus an explicit exception naming
+                    # the breach size.
+                    exceptions.append({
+                        "level": "warn", "kind": "HARD_CAP_SUBMIN",
+                        "sector": sec, "symbol": trade.get("symbol"),
+                        "current_pct": round(cur, 2), "limit_pct": hard,
+                        "detail": (
+                            f"{sec} hard-cap trim ({trade.get('symbol')}, "
+                            f"KES {float(trade.get('value', 0.0)):,.0f}) is below "
+                            f"MIN_TRADE_KES {min_trade:,.0f} — the minimal trim that "
+                            f"fixes the breach (required sale KES {required:,.0f}) "
+                            f"will be skipped by the executor's min-trade floor, so "
+                            f"the cap breach ({cur:.2f}% vs hard {hard:.0f}%) cannot "
+                            f"be corrected by a trade this session"
+                        ),
+                    })
+            if partial and need > 0.005:
+                # Sellable holdings exhausted while the breach persists (the
+                # rest of the sector is suspended or unpriced) — say so.
+                exceptions.append({
+                    "level": "error", "kind": "HARD_CAP_UNSELLABLE",
+                    "sector": sec, "symbol": None,
+                    "current_pct": round(cur, 2), "limit_pct": hard,
+                    "detail": (
+                        f"{sec} over HARD cap ({cur:.2f}% vs {hard:.0f}%) and the "
+                        f"planned trims cannot close it: remaining KES {need:,.0f} "
+                        f"of holdings are suspended or unpriced — cap breach "
+                        f"cannot be corrected by a trade this session"
+                    ),
+                })
+        if not adjusted:
+            break
+    return trades, exceptions
 
 
 def _load_portfolio() -> dict[str, Any]:
@@ -987,6 +1213,15 @@ def generate_rebalance_plan(
             risk=_trade_risk(sym, signal_full, hist_cache),
         ))
 
+    # === HARD cap enforcement (t_326ee74d) ===
+    # Every HARD cap breach must end with an EXECUTABLE trim in the plan:
+    # sized by post-trade fixed point, >= MIN_TRADE_KES when the math allows,
+    # explicit HARD_CAP_SUBMIN exception otherwise. Runs AFTER all other trade
+    # generation so sizing sees every queued sell (denominator effects
+    # included), and BEFORE validate_plan_constraints so a breach WITH a trim
+    # never reports HARD_CAP_NO_TRIM.
+    trades, cap_exceptions = _enforce_hard_cap_trims(trades, weights, prices)
+
     # Summary
     buy_value = sum(t["value"] for t in trades if t["side"] == "BUY")
     sell_value = sum(t["value"] for t in trades if t["side"] == "SELL")
@@ -994,8 +1229,10 @@ def generate_rebalance_plan(
     # Concentration guardrails (high cap + low floor)
     violations = validate_plan_constraints(weights, targets, trades, portfolio)
     # Append stop-loss re-entry cooldown skips so the auto-trader surfaces
-    # them (it reports plan["violations"] as skips in its step-2 loop).
-    violations = list(violations) + cooldown_skips
+    # them (it reports plan["violations"] as skips in its step-2 loop), plus
+    # the hard-cap enforcement exceptions (sub-minimum / unsellable) which
+    # name exactly why a breach cannot be corrected by a trade this session.
+    violations = list(violations) + cap_exceptions + cooldown_skips
 
     return {
         "trades": trades,

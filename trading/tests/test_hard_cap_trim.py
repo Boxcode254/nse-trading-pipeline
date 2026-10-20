@@ -1,0 +1,270 @@
+"""HARD cap trim sizing + honest diagnostics (t_326ee74d).
+
+Covers three defects found in the 2026-10-20 production run:
+  D1  the cap trim was sized as a single-step delta (KES 316 for SCBK where
+      the post-trade ratio requires ~KES 1,023 = ~4 SCBK shares), and the
+      executor then dropped it as "Sell too small" — breach persisted.
+  D2  HARD_CAP_NO_TRIM ("no trim trade generated") was emitted even though a
+      trim existed and was suppressed by the executor's minimum.
+
+Policy under test: cap enforcement wins over the min-trade cost heuristic at
+plan level — a HARD cap breach must end with an executable trim (post-trade
+weight <= cap, value >= MIN_TRADE_KES) or an explicit, honest exception.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from trading import config as trading_config
+from trading import target_allocation as ta
+from trading.auto_trader import _min_trade_skip
+from trading.target_allocation import (
+    generate_rebalance_plan,
+    hard_cap_required_sale_value,
+)
+
+SCBK_PRICE = 317.50
+
+
+@pytest.fixture
+def frozen_caps(monkeypatch):
+    """Deterministic tiered caps: banking warn 40 / hard 45 (config defaults)."""
+
+    def _cap(sec, **kwargs):
+        if sec == "banking":
+            return {"warn": 40.0, "hard": 45.0}
+        return {"warn": 25.0, "hard": 30.0}
+
+    monkeypatch.setattr(trading_config, "sector_cap", _cap)
+
+
+def _pos(sym: str, shares: int, price: float) -> dict:
+    return {
+        "symbol": sym,
+        "shares": shares,
+        "avg_cost": price,
+        "current_value": shares * price,
+    }
+
+
+def _breach_book() -> dict:
+    """Mirror of the 2026-10-20 production book: banking 45,575 / 100,028."""
+    positions = [
+        _pos("COOP", 40, 135.0),    # banking   5,400
+        _pos("KCB", 100, 143.0),    # banking  14,300
+        _pos("SCBK", 50, SCBK_PRICE),  # banking 15,875 (largest -> trim target)
+        _pos("ABSA", 100, 100.0),   # banking  10,000  -> sector 45,575
+        _pos("SCOM", 100, 140.0),   # telecom  14,000  (13.99%, within tol)
+        _pos("KPLC", 1000, 10.0),   # energy   10,000  (9.99%, within tol)
+    ]
+    cash = 100028.0 - sum(p["current_value"] for p in positions)
+    return {"cash": cash, "positions": positions, "initial_capital": 100000}
+
+
+def _plan(book: dict) -> dict:
+    prices = {p["symbol"]: p["avg_cost"] for p in book["positions"]}
+    signals = [{"symbol": s, "score": 50} for s in prices]
+    return generate_rebalance_plan(
+        signals=signals, prices=prices, portfolio=book, dry_run=True
+    )
+
+
+def _violation_kinds(plan: dict) -> set:
+    return {v.get("kind") for v in plan.get("violations", [])}
+
+
+# ── Unit: the fixed point, not a single-step delta ──────────────────────────
+
+
+def test_fixed_point_solves_post_trade_ratio():
+    # Production numbers: banking 45,575 of 100,028, hard cap 45%.
+    # Single-step delta would say 45575 - 0.45*100028 = 562.4 (the old bug).
+    # The true required sale solves (45575-x)/(100028-x) <= 0.45 -> ~1,023.
+    required = hard_cap_required_sale_value(45575.0, 100028.0, 45.0)
+    assert required == pytest.approx(1022.55, abs=0.5)
+    assert required > 562.0  # strictly more than the single-step delta
+    # Verify the inequality it claims:
+    assert (45575.0 - required) / (100028.0 - required) <= 0.45
+    # A single-step sale does NOT satisfy it:
+    assert (45575.0 - 562.4) / (100028.0 - 562.4) > 0.45
+
+
+def test_fixed_point_accounts_for_other_sector_sells():
+    # Another sector selling 5,000 shrinks the denominator -> banking must
+    # sell more than the no-other-sells answer.
+    base = hard_cap_required_sale_value(45575.0, 100028.0, 45.0)
+    with_other = hard_cap_required_sale_value(
+        45575.0, 100028.0, 45.0, other_sells=5000.0
+    )
+    assert with_other > base
+    assert (45575.0 - with_other) / (100028.0 - 5000.0 - with_other) <= 0.45
+
+
+def test_fixed_point_no_breach_returns_zero():
+    assert hard_cap_required_sale_value(40000.0, 100028.0, 45.0) == 0.0
+
+
+# ── D1: breach -> executable, correctly-sized trim in the plan ──────────────
+
+
+def test_breach_emits_executable_trim(frozen_caps):
+    book = _breach_book()
+    plan = _plan(book)
+    banking_sells = [
+        t for t in plan["trades"] if t["side"] == "SELL" and t["sector"] == "banking"
+    ]
+    assert banking_sells, "HARD cap breach must produce a banking trim in the plan"
+    trim = banking_sells[0]
+    # Largest holding (SCBK) gets the trim, rounded UP to whole shares
+    assert trim["symbol"] == "SCBK"
+    assert trim["delta_shares"] == 4  # ceil(1022.55 / 317.50) = 4
+    # Executable: survives the executor's MIN_TRADE_KES floor
+    assert trim["value"] >= trading_config.MIN_TRADE_KES
+    # Independent recomputation of the post-trade weight (ALL sells applied):
+    sold_bank = sum(t["value"] for t in banking_sells)
+    sold_other = sum(
+        t["value"] for t in plan["trades"]
+        if t["side"] == "SELL" and t["sector"] != "banking"
+    )
+    post_w = (45575.0 - sold_bank) / (100028.0 - sold_bank - sold_other) * 100
+    assert post_w <= 45.0, f"post-trade banking weight {post_w:.2f}% still over cap"
+    kinds = _violation_kinds(plan)
+    assert "HARD_CAP" in kinds
+    assert "HARD_CAP_NO_TRIM" not in kinds
+    assert "HARD_CAP_SUBMIN" not in kinds
+
+
+def test_trim_survives_auto_trader_min_trade_filter(frozen_caps):
+    """Drive the real executor filter over the plan's trim (t_e056a504 gate 2)."""
+    book = _breach_book()
+    plan = _plan(book)
+    trim = next(
+        t for t in plan["trades"]
+        if t["side"] == "SELL" and t["sector"] == "banking"
+    )
+    # This mirrors exactly what run_auto_trade step 2 -> step 7 does with a
+    # plan SELL trade (sector/hard_cap_trim metadata passed through):
+    sell = {
+        "symbol": trim["symbol"],
+        "delta_shares": trim["delta_shares"],
+        "reason": trim["reason"],
+        "stop_loss": False,
+        "sector_cap": False,
+        "hard_cap_trim": trim.get("hard_cap_trim", False),
+        "sector": trim.get("sector", ""),
+        "sector_pct": trim.get("sector_pct"),
+        "cap_hard_pct": trim.get("cap_hard_pct"),
+    }
+    sell_value = sell["delta_shares"] * SCBK_PRICE
+    assert sell_value >= trading_config.MIN_TRADE_KES
+    # The real filter: None = trade survives to the execution list
+    assert _min_trade_skip(sell, sell_value) is None
+
+
+# ── Tiny breach: explicit sub-minimum exception, never a lying diagnostic ───
+
+
+def _tiny_breach_book() -> dict:
+    """banking exactly 45,025 / 100,000 = 45.025% — required trim ~KES 45,
+    so even the minimal 1-share SCBK sale (KES 317.50) is below MIN_TRADE_KES."""
+    positions = [
+        _pos("COOP", 110, 135.0),      # banking  14,850
+        _pos("KCB", 100, 143.0),       # banking  14,300
+        _pos("SCBK", 50, SCBK_PRICE),  # banking  15,875 -> sector 45,025
+        _pos("SCOM", 100, 140.0),      # telecom  14,000
+        _pos("KPLC", 1000, 10.0),      # energy   10,000
+    ]
+    invested = sum(p["current_value"] for p in positions)
+    cash = 100000.0 - invested
+    return {"cash": cash, "positions": positions, "initial_capital": 100000}
+
+
+def test_tiny_breach_submin_exception_not_no_trim(frozen_caps):
+    book = _tiny_breach_book()
+    banking_val = sum(
+        p["current_value"] for p in book["positions"]
+        if p["symbol"] in ("COOP", "KCB", "SCBK")
+    )
+    assert banking_val == 45025.0
+    assert banking_val / 100000.0 * 100 == pytest.approx(45.025)
+    plan = _plan(book)
+    banking_sells = [
+        t for t in plan["trades"] if t["side"] == "SELL" and t["sector"] == "banking"
+    ]
+    # The minimal trim IS emitted (1 share), not silently dropped
+    assert len(banking_sells) == 1
+    trim = banking_sells[0]
+    assert trim["delta_shares"] == 1
+    assert trim["value"] == pytest.approx(SCBK_PRICE)
+    # ...and the post-trade weight really is back under the cap
+    post_w = (banking_val - SCBK_PRICE) / (100000.0 - SCBK_PRICE) * 100
+    assert post_w <= 45.0
+    kinds = _violation_kinds(plan)
+    assert "HARD_CAP" in kinds
+    # The honest diagnostics: sub-minimum exception YES, "no trim" NO
+    assert "HARD_CAP_SUBMIN" in kinds
+    assert "HARD_CAP_NO_TRIM" not in kinds
+    submin = next(v for v in plan["violations"] if v["kind"] == "HARD_CAP_SUBMIN")
+    assert "MIN_TRADE_KES" in submin["detail"]
+    # Executor: the same trim is skipped with an honest message, not a bare
+    # "Sell too small"
+    msg = _min_trade_skip(
+        {
+            "sector_cap": False,
+            "hard_cap_trim": True,
+            "sector": "banking",
+            "sector_pct": 45.03,
+            "cap_hard_pct": 45.0,
+        },
+        SCBK_PRICE,
+    )
+    assert msg is not None
+    assert "cannot be corrected by a trade this session" in msg
+    assert "Sell too small" not in msg
+
+
+# ── Regression: calm book -> no trim, no cap violations ─────────────────────
+
+
+def test_calm_book_no_trim_no_cap_violations(frozen_caps):
+    positions = [
+        _pos("COOP", 100, 135.0),   # banking  13,500
+        _pos("KCB", 100, 143.0),    # banking  14,300
+        _pos("SCBK", 30, SCBK_PRICE),  # banking 9,525
+        _pos("ABSA", 22, 100.0),    # banking   2,200 -> 39,525 (39.5%, < warn 40)
+        _pos("SCOM", 107, 140.0),   # telecom 14,980 (14.98%)
+        _pos("KPLC", 1200, 10.0),   # energy  12,000 (12.0%)
+    ]
+    invested = sum(p["current_value"] for p in positions)
+    book = {
+        "cash": 100000.0 - invested,
+        "positions": positions,
+        "initial_capital": 100000,
+    }
+    plan = _plan(book)
+    assert not [
+        t for t in plan["trades"] if t["side"] == "SELL"
+    ], "a book inside all caps must produce no trim"
+    kinds = _violation_kinds(plan)
+    assert not kinds & {
+        "HARD_CAP", "HARD_CAP_NO_TRIM", "HARD_CAP_SUBMIN", "HARD_CAP_UNSELLABLE"
+    }
+
+
+# ── Genuine no-trim case must still raise HARD_CAP_NO_TRIM ──────────────────
+
+
+def test_unsellable_breach_still_raises_no_trim(frozen_caps, monkeypatch):
+    """A breach with NO sellable holding keeps the truthful HARD_CAP_NO_TRIM."""
+    monkeypatch.setattr(ta, "SUSPENDED", {"SCBK"})
+    book = {
+        "cash": 14125.0,
+        "positions": [_pos("SCBK", 50, SCBK_PRICE)],  # 15,875 / 30,000 = 52.9%
+        "initial_capital": 30000,
+    }
+    plan = _plan(book)
+    assert not [t for t in plan["trades"] if t["side"] == "SELL"]
+    kinds = _violation_kinds(plan)
+    assert "HARD_CAP" in kinds
+    assert "HARD_CAP_NO_TRIM" in kinds  # genuinely no trim — message is true
