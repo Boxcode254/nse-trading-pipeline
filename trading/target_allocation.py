@@ -330,7 +330,11 @@ def validate_plan_constraints(
     #     with momentum uplift, so the rebalancer and execution agree. WARN = review
     #     flag, HARD = forced trim.
     for sec, info in sectors.items():
-        cur = info.get("current_pct", 0.0)
+        # Breach decision uses the UNROUNDED percentage (t_36c85a04): a sector
+        # at 45.0021% vs a 45% hard cap is a real breach — 2dp rounding used
+        # to hide it and degrade HARD_CAP to an advisory WARN_CAP. Fallback to
+        # the rounded key keeps older callers behaving exactly as before.
+        cur = info.get("current_pct_raw", info.get("current_pct", 0.0))
         cap = config.sector_cap(sec)
         hard = cap["hard"]
         warn = cap["warn"]
@@ -818,7 +822,12 @@ def compute_targets(
         current[sec] = {
             "target_pct": target_pct,
             "tolerance": tolerance,
+            # current_pct is the ROUNDED display value; current_pct_raw keeps
+            # the exact percentage so cap comparisons (validate_plan_constraints,
+            # the ADD guards) never blind out the (hard, hard + 0.005pp) band
+            # where 2dp rounding rounds a real breach back to the cap (t_36c85a04).
             "current_pct": round(current_pct, 2),
+            "current_pct_raw": current_pct,
             "current_value": round(current_value, 2),
             "drift_pct": round(drift_pct, 2),
             "status": status,
@@ -1065,7 +1074,11 @@ def generate_rebalance_plan(
         if info["action"] not in ("add",):
             continue
         # Concentration guard: never ADD to a sector already at/over HARD cap.
-        if info.get("current_pct", 0.0) > config.sector_cap(sec)["hard"]:
+        # Unrounded comparison (t_36c85a04) so a razor breach inside the 2dp
+        # rounding band cannot sneak a BUY through.
+        if info.get(
+            "current_pct_raw", info.get("current_pct", 0.0)
+        ) > config.sector_cap(sec)["hard"]:
             continue
         # Risk weights across the sector's stock list (fail-open to equal).
         rweights = _risk_weights_for_sector(
@@ -1125,7 +1138,11 @@ def generate_rebalance_plan(
         if info["action"] != "add":
             continue
         # Concentration guard: never ADD to a sector already at/over HARD cap.
-        if info.get("current_pct", 0.0) > config.sector_cap(sec)["hard"]:
+        # Unrounded comparison (t_36c85a04) so a razor breach inside the 2dp
+        # rounding band cannot sneak a BUY through.
+        if info.get(
+            "current_pct_raw", info.get("current_pct", 0.0)
+        ) > config.sector_cap(sec)["hard"]:
             continue
         # Risk weights across the sector's HELD names only (correlation-aware).
         held_in_sector_syms = [s for s in info["stocks_in_sector"] if s in current_stocks]

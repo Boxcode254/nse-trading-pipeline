@@ -268,3 +268,129 @@ def test_unsellable_breach_still_raises_no_trim(frozen_caps, monkeypatch):
     kinds = _violation_kinds(plan)
     assert "HARD_CAP" in kinds
     assert "HARD_CAP_NO_TRIM" in kinds  # genuinely no trim — message is true
+
+
+# ── Razor band: 2dp rounding must not hide a real breach (t_36c85a04) ───────
+#
+# validate_plan_constraints used to compare the ROUNDED current_pct (2dp)
+# against the caps, so a breach in the open band (hard, hard + 0.005pp]
+# degraded silently to WARN_CAP. The breach decision now uses the unrounded
+# percentage; the display value stays rounded.
+
+
+def _razor_book(bank_extra: float) -> dict:
+    """Book with banking at (45,000 + bank_extra) KES of exactly 100,000 total.
+
+    bank_extra 0.0   -> 45.0000% (exactly at the cap)
+    bank_extra 0.1   -> 45.0001% ... 2.1 -> 45.0021% (inside the blind band)
+    bank_extra -0.1  -> 44.9999%  (just inside)
+    """
+    positions = [
+        _pos("COOP", 100, 135.0),       # banking 13,500
+        _pos("KCB", 100, 143.0),        # banking 14,300
+        _pos("SCBK", 50, SCBK_PRICE),   # banking 15,875
+        {   # fractional MTM value dials the sector into the razor band
+            "symbol": "ABSA",
+            "shares": 13,
+            "avg_cost": 100.0,
+            "current_value": 1325.0 + bank_extra,
+        },
+        _pos("SCOM", 100, 140.0),       # telecom 14,000
+        _pos("KPLC", 1000, 10.0),       # energy  10,000
+    ]
+    invested = sum(float(p["current_value"]) for p in positions)
+    cash = 100000.0 - invested
+    return {"cash": cash, "positions": positions, "initial_capital": 100000}
+
+
+def _banking_pct(book: dict) -> float:
+    w = ta.compute_sector_weights(book)
+    return w["sectors"]["banking"]["pct"]
+
+
+def test_razor_breach_raises_hard_cap_not_warn(frozen_caps):
+    """45.0021% vs a 45% hard cap -> HARD_CAP (error) + trim + honest skip."""
+    book = _razor_book(2.1)
+    assert _banking_pct(book) == pytest.approx(45.0021, abs=1e-9)
+    plan = _plan(book)
+    kinds = _violation_kinds(plan)
+    hard = [v for v in plan["violations"] if v.get("kind") == "HARD_CAP"]
+    assert hard, f"razor breach must raise HARD_CAP, got kinds {kinds}"
+    assert hard[0]["level"] == "error"
+    assert hard[0]["current_pct"] == 45.0   # display stays rounded to 2dp
+    assert "HARD_CAP_NO_TRIM" not in kinds  # the plan DOES contain a trim
+    banking_sells = [
+        t for t in plan["trades"]
+        if t["side"] == "SELL" and t["sector"] == "banking"
+    ]
+    assert banking_sells, "razor breach must produce a banking trim"
+    # The minimal trim (1 share) is below MIN_TRADE_KES -> the executor skips
+    # it with the honest "cannot be corrected this session" message.
+    submin = [
+        v for v in plan["violations"] if v.get("kind") == "HARD_CAP_SUBMIN"
+    ]
+    assert submin, f"sub-minimum trim must be named honestly, got kinds {kinds}"
+    msg = _min_trade_skip(
+        {
+            "sector_cap": False,
+            "hard_cap_trim": True,
+            "sector": "banking",
+            "sector_pct": 45.0021,
+            "cap_hard_pct": 45.0,
+        },
+        banking_sells[0]["value"],
+    )
+    assert msg is not None
+    assert "cannot be corrected by a trade this session" in msg
+
+
+def test_just_inside_cap_no_hard_cap_no_trim(frozen_caps):
+    book = _razor_book(-0.1)
+    assert _banking_pct(book) == pytest.approx(44.9999, abs=1e-9)
+    plan = _plan(book)
+    kinds = _violation_kinds(plan)
+    assert not kinds & {"HARD_CAP", "HARD_CAP_NO_TRIM", "HARD_CAP_SUBMIN"}
+    assert not [
+        t for t in plan["trades"]
+        if t["side"] == "SELL" and t["sector"] == "banking"
+    ], "44.9999% is inside the cap — no trim may be generated"
+
+
+def test_exactly_at_cap_is_not_a_breach(frozen_caps):
+    """Cap comparison is strictly '>' — 45.0000% exactly is NOT a breach.
+
+    Locks the (pre-existing) open-interval semantics explicitly so they stay
+    a decision, not an accident.
+    """
+    book = _razor_book(0.0)
+    pct = _banking_pct(book)
+    assert pct == pytest.approx(45.0, abs=1e-9)
+    plan = _plan(book)
+    kinds = _violation_kinds(plan)
+    assert not kinds & {"HARD_CAP", "HARD_CAP_NO_TRIM", "HARD_CAP_SUBMIN"}
+    assert not [
+        t for t in plan["trades"]
+        if t["side"] == "SELL" and t["sector"] == "banking"
+    ]
+
+
+def test_validate_uses_unrounded_raw_key(frozen_caps):
+    """Unit: validate_plan_constraints must compare the raw, not rounded, pct."""
+    targets = {
+        "current": {
+            "banking": {
+                "current_pct": 45.0,        # rounded — used to hide the breach
+                "current_pct_raw": 45.0021,  # true value
+            }
+        }
+    }
+    violations = ta.validate_plan_constraints({}, targets, [], {})
+    kinds = {v["kind"] for v in violations}
+    assert "HARD_CAP" in kinds
+    assert "WARN_CAP" not in kinds
+    # No raw key -> falls back to the rounded value (legacy behaviour)
+    targets_legacy = {"current": {"banking": {"current_pct": 45.0}}}
+    kinds_legacy = {
+        v["kind"] for v in ta.validate_plan_constraints({}, targets_legacy, [], {})
+    }
+    assert "HARD_CAP" not in kinds_legacy
